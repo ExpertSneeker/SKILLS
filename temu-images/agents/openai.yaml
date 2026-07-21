@@ -1,0 +1,4 @@
+interface:
+  display_name: "TEMU 美国站图片"
+  short_description: "规划、生成、追踪并验收 TEMU 美国站整套商品图片"
+  default_prompt: "使用 $temu-images 根据产品文件夹、需求表、产品实拍图和尺寸，规划并制作 TEMU 美国站整套商品图片。"
