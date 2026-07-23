@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import io
 import json
@@ -12,9 +13,15 @@ import re
 import shutil
 import sys
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+if os.name == "nt":
+    import msvcrt
+elif os.name == "posix":
+    import fcntl
 
 try:
     from PIL import Image, UnidentifiedImageError
@@ -105,10 +112,34 @@ VALID_EXECUTION_STATUSES = {
     "planned", "approved", "dispatched", "generating",
     "awaiting_review", "blocked", "complete",
 }
-VALID_ATTEMPT_STATUSES = {"calling", "accepted", "rejected", "failed"}
-ARTIFACT_SCHEMA_VERSION = 5
-JOB_SCHEMA_VERSION = 1
-REQUIRED_RECORD_FIELDS = {
+VALID_APPROVED_JOB_STATUSES = {"approved", "in_progress", "ready_for_validation", "complete"}
+VALID_ATTEMPT_STATUSES_V1 = {"calling", "accepted", "rejected", "failed"}
+VALID_ATTEMPT_STATUSES_V2 = {
+    "calling", "unresolved", "staged", "accepted", "rejected", "failed",
+}
+VALID_DISPATCH_MODES = {"parallel", "serial"}
+PENDING_ATTEMPT_STATUSES = {"calling", "unresolved", "staged"}
+VALID_FAILURE_TYPES = {
+    "completed_without_path", "timeout", "interrupted", "provider_error",
+    "source_invalid", "stage_error", "other",
+}
+UNRESOLVED_FAILURE_TYPES = {"timeout", "interrupted"}
+CONCURRENCY_POLICY = {
+    "scope": "cross_image_only",
+    "max_calling_attempts": 3,
+    "max_pending_attempts": 3,
+    "parallel_provenance": "tool_return_only",
+    "serial_fallback": "retry_after_drain",
+}
+JOB_SCHEMA_V1 = 1
+JOB_SCHEMA_V2 = 2
+ARTIFACT_SCHEMA_V5 = 5
+ARTIFACT_SCHEMA_V6 = 6
+JOB_TO_ARTIFACT_SCHEMA = {
+    JOB_SCHEMA_V1: ARTIFACT_SCHEMA_V5,
+    JOB_SCHEMA_V2: ARTIFACT_SCHEMA_V6,
+}
+REQUIRED_RECORD_FIELDS_V5 = {
     "schema_version",
     "artifact_id",
     "task_id",
@@ -148,6 +179,17 @@ REQUIRED_RECORD_FIELDS = {
     "supersedes_artifact_id",
     "supersession_reason",
 }
+REQUIRED_RECORD_FIELDS_V6 = REQUIRED_RECORD_FIELDS_V5 | {
+    "provider_source_path",
+    "provider_source_sha256",
+    "staged_at",
+}
+
+# v1/v5 兼容路径仍由下方旧逻辑使用；版本化入口会覆盖新任务行为。
+JOB_SCHEMA_VERSION = JOB_SCHEMA_V1
+ARTIFACT_SCHEMA_VERSION = ARTIFACT_SCHEMA_V5
+REQUIRED_RECORD_FIELDS = REQUIRED_RECORD_FIELDS_V5
+VALID_ATTEMPT_STATUSES = VALID_ATTEMPT_STATUSES_V1
 
 SCOPE_REFERENCE_FIELDS = (
     "reference_id", "evidence_id", "path", "role", "applies_to", "source_location",
@@ -176,6 +218,119 @@ def _canonical_sha256(value: Any) -> str:
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_job_version_and_policy(job: dict[str, Any]) -> int:
+    """返回任务版本，并严格验证 v2 的固定并发策略。"""
+    version = job.get("schema_version")
+    if version == JOB_SCHEMA_V1:
+        if "concurrency_policy" in job:
+            raise TrackerError("v1 任务不能声明 concurrency_policy 并发策略")
+        return version
+    if version == JOB_SCHEMA_V2:
+        if job.get("concurrency_policy") != CONCURRENCY_POLICY:
+            raise TrackerError("v2 任务必须使用固定 concurrency_policy 并发策略")
+        return version
+    raise TrackerError(f"任务 JSON 版本无效：{version!r}")
+
+
+def _read_job_file(job_path: str | Path) -> tuple[Path, dict[str, Any]]:
+    path = _absolute(job_path)
+    if not path.is_file():
+        raise TrackerError(f"任务 JSON 不存在：{path}")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise TrackerError(f"任务 JSON 无法读取：{path}") from error
+    if not isinstance(value, dict):
+        raise TrackerError(f"任务 JSON 顶层必须是对象：{path}")
+    _validate_job_version_and_policy(value)
+    return path, value
+
+
+def _write_job_atomic(job_path: str | Path, job: dict[str, Any]) -> None:
+    """在同目录写临时文件后原子替换任务 JSON。"""
+    path = _absolute(job_path)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    content = (json.dumps(job, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    try:
+        _write_exclusive(temporary, content)
+        os.replace(temporary, path)
+    except OSError as error:
+        temporary.unlink(missing_ok=True)
+        raise TrackerError(f"任务 JSON 原子写入失败：{path}") from error
+
+
+@contextmanager
+def _exclusive_file_lock(lock_path: str | Path, busy_message: str) -> Any:
+    """以持久锁文件上的 OS 句柄锁保护临界区。"""
+    path = _absolute(lock_path)
+    descriptor = -1
+    try:
+        try:
+            descriptor = os.open(
+                path,
+                os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0),
+                0o600,
+            )
+        except OSError as error:
+            raise TrackerError(f"排他锁文件无法打开：{path}") from error
+
+        try:
+            if os.name == "nt":
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            elif os.name == "posix":
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                raise TrackerError(f"当前平台不支持可靠的排他文件锁：{path}")
+        except OSError as error:
+            busy_errnos = (
+                {errno.EACCES}
+                if os.name == "nt"
+                else {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}
+            )
+            if error.errno in busy_errnos:
+                raise TrackerError(busy_message) from error
+            raise TrackerError(f"排他锁文件无法加锁：{path}") from error
+
+        yield
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+
+
+def _mutate_job_atomic(job_path: str | Path, mutator: Any) -> Any:
+    """排他执行一次 job 的读取、校验、修改和原子替换。"""
+    path = _absolute(job_path)
+    with _job_lock(path):
+        _, job = _read_job_file(path)
+        result = mutator(job)
+        _write_job_atomic(path, job)
+        return result
+
+
+@contextmanager
+def _job_lock(job_path: str | Path) -> Any:
+    path = _absolute(job_path)
+    lock_path = path.with_name(f".{path.name}.lock")
+    with _exclusive_file_lock(
+        lock_path,
+        f"任务 JSON 正在被其他主 Session 修改：{path}",
+    ):
+        yield
+
+
+@contextmanager
+def _manifest_lock(manifest_path: str | Path) -> Any:
+    path = _absolute(manifest_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(f".{path.name}.lock")
+    with _exclusive_file_lock(
+        lock_path,
+        f"清单正在被其他主 Session 修改：{path}",
+    ):
+        yield
 
 
 def _approval_scope_payload(job: dict[str, Any]) -> dict[str, Any]:
@@ -381,6 +536,8 @@ def _copy_exclusive(source_path: str | Path, target_path: str | Path) -> None:
         with source.open("rb") as input_file, os.fdopen(descriptor, "wb") as output_file:
             descriptor = -1
             shutil.copyfileobj(input_file, output_file, length=1024 * 1024)
+            output_file.flush()
+            os.fsync(output_file.fileno())
     except Exception:
         if descriptor != -1:
             os.close(descriptor)
@@ -402,6 +559,8 @@ def _write_exclusive(path: str | Path, content: bytes) -> None:
         with os.fdopen(descriptor, "wb") as output_file:
             descriptor = -1
             output_file.write(content)
+            output_file.flush()
+            os.fsync(output_file.fileno())
     except Exception:
         if descriptor != -1:
             os.close(descriptor)
@@ -430,24 +589,39 @@ def _load_manifest(manifest_path: str | Path) -> list[dict[str, Any]]:
         raise TrackerError(f"无法读取清单：{path}") from error
 
 
-def _append_manifest(manifest_path: str | Path, record: dict[str, Any]) -> None:
+def _replace_manifest_bytes(manifest_path: str | Path, content: bytes) -> None:
     path = _absolute(manifest_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8", newline="\n") as manifest:
-        manifest.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        _write_exclusive(temporary, content)
+        os.replace(temporary, path)
+    except OSError as error:
+        temporary.unlink(missing_ok=True)
+        raise TrackerError(f"清单原子写入失败：{path}") from error
 
 
-def _restore_manifest(manifest_path: str | Path, existed: bool, byte_count: int) -> None:
-    """在追加失败时恢复本次调用前的清单长度。"""
+def _append_manifest(manifest_path: str | Path, record: dict[str, Any]) -> None:
     path = _absolute(manifest_path)
     try:
-        if existed and path.exists():
-            with path.open("r+b") as manifest:
-                manifest.truncate(byte_count)
-        elif not existed:
+        previous = path.read_bytes() if path.exists() else b""
+    except OSError as error:
+        raise TrackerError(f"清单无法读取：{path}") from error
+    separator = b"" if not previous or previous.endswith((b"\n", b"\r")) else b"\n"
+    encoded = (json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+    _replace_manifest_bytes(path, previous + separator + encoded)
+
+
+def _restore_manifest(manifest_path: str | Path, previous: bytes | None) -> None:
+    """原子恢复命令进入时的完整清单字节。"""
+    path = _absolute(manifest_path)
+    if previous is None:
+        try:
             path.unlink(missing_ok=True)
-    except OSError:
-        pass
+        except OSError as error:
+            raise TrackerError(f"清单回滚失败：{path}") from error
+        return
+    _replace_manifest_bytes(path, previous)
 
 
 def _read_prompt(prompt_path: str | Path) -> tuple[Path, str]:
@@ -788,6 +962,7 @@ def _validate_material_inventory(job: dict[str, Any]) -> dict[str, Any]:
 
 
 def _validate_job_contract(job: dict[str, Any], image: dict[str, Any]) -> dict[str, Any]:
+    job_version = _validate_job_version_and_policy(job)
     image_id = image.get("image_id")
     material_context = _validate_material_inventory(job)
     main_session_id = material_context["main_session_id"]
@@ -914,7 +1089,11 @@ def _validate_job_contract(job: dict[str, Any], image: dict[str, Any]) -> dict[s
         attempt_no = attempt["attempt_no"]
         label = f"图号 {image_id} 的 attempt {attempt_no}"
         status = attempt.get("status")
-        if status not in VALID_ATTEMPT_STATUSES:
+        valid_attempt_statuses = (
+            VALID_ATTEMPT_STATUSES_V2 if job_version == JOB_SCHEMA_V2
+            else VALID_ATTEMPT_STATUSES_V1
+        )
+        if status not in valid_attempt_statuses:
             raise TrackerError(f"{label} 的尝试状态不在契约枚举中")
         attempt_scope_version = attempt.get("approval_scope_version")
         attempt_scope_sha256 = attempt.get("approval_scope_sha256")
@@ -956,7 +1135,7 @@ def _validate_job_contract(job: dict[str, Any], image: dict[str, Any]) -> dict[s
         if set(attempt_reference_ids) - viewed_attempt_references:
             raise TrackerError(f"{label} 的历史 view_events 未覆盖全部 input_reference_ids")
         binds_current_scope = (
-            status == "calling"
+            status in PENDING_ATTEMPT_STATUSES
             or (
                 status in {"accepted", "rejected"}
                 and attempt_scope_version == current_scope_version
@@ -977,12 +1156,91 @@ def _validate_job_contract(job: dict[str, Any], image: dict[str, Any]) -> dict[s
         _validate_absolute_hashed_file(attempt, "prompt_path", "prompt_sha256", label)
         _validate_absolute_hashed_file(attempt, "snapshot_path", "snapshot_sha256", label)
         _parse_datetime(attempt.get("call_started_at"), f"{label} 的 call_started_at")
+        if job_version == JOB_SCHEMA_V2:
+            dispatch_mode = attempt.get("dispatch_mode")
+            if dispatch_mode not in VALID_DISPATCH_MODES:
+                raise TrackerError(f"{label} 的 dispatch_mode 必须是 parallel 或 serial")
+            if attempt.get("artifact_kind") not in {"direct", "revision"}:
+                raise TrackerError(f"{label} 的 artifact_kind 必须是 direct 或 revision")
+            direct_index = attempt.get("direct_index")
+            if direct_index is not None and (
+                type(direct_index) is not int or direct_index not in {1, 2, 3}
+            ):
+                raise TrackerError(f"{label} 的 direct_index 必须为空或整数 1、2、3")
+            if attempt.get("artifact_kind") == "revision" and direct_index is not None:
+                raise TrackerError(f"{label} 的 revision 不能填写 direct_index")
+            source_dir = attempt.get("source_dir")
+            if (
+                not isinstance(source_dir, str) or not source_dir.strip()
+                or not Path(source_dir).is_absolute() or not Path(source_dir).is_dir()
+            ):
+                raise TrackerError(f"{label} 的 source_dir 必须是存在的绝对目录")
+            _load_snapshot(attempt["snapshot_path"], source_dir)
+            if status in {"staged", "accepted", "rejected"}:
+                width = attempt.get("width")
+                height = attempt.get("height")
+                if (
+                    type(width) is not int or width < 1
+                    or type(height) is not int or height < 1
+                ):
+                    raise TrackerError(f"{label} 的 width、height 必须是正整数")
+                for path_key, hash_key in (
+                    ("provider_source_path", "provider_source_sha256"),
+                    ("staged_path", "staged_sha256"),
+                ):
+                    path_value = attempt.get(path_key)
+                    hash_value = attempt.get(hash_key)
+                    if (
+                        not isinstance(path_value, str) or not Path(path_value).is_absolute()
+                        or not isinstance(hash_value, str)
+                        or re.fullmatch(r"[0-9a-f]{64}", hash_value) is None
+                    ):
+                        raise TrackerError(f"{label} 的 {path_key}/{hash_key} 无效")
+                provider_source = _absolute(attempt["provider_source_path"])
+                try:
+                    provider_source.relative_to(_absolute(source_dir))
+                except ValueError as error:
+                    raise TrackerError(
+                        f"{label} 的 provider_source_path 位于绑定 source_dir 目录之外"
+                    ) from error
+                _validate_absolute_hashed_file(
+                    attempt, "staged_path", "staged_sha256", f"{label} 的 staged 暂存副本",
+                )
+                _parse_datetime(attempt.get("staged_at"), f"{label} 的 staged_at")
+                if attempt.get("provenance_mode") != "tool_return":
+                    raise TrackerError(f"{label} 的 provenance_mode 必须是 tool_return")
         artifact_id = attempt.get("artifact_id")
+        if job_version == JOB_SCHEMA_V2 and status in {"failed", "unresolved"}:
+            _parse_datetime(
+                attempt.get("failure_recorded_at"), f"{label} 的 failure_recorded_at",
+            )
+            if type(attempt.get("termination_confirmed")) is not bool:
+                raise TrackerError(f"{label} 的 termination_confirmed 必须是布尔值 bool")
         if status == "failed":
             if not isinstance(attempt.get("failure_reason"), str) or not attempt["failure_reason"].strip():
                 raise TrackerError(f"{label} 的 failed 状态缺少失败原因")
+            if (
+                job_version == JOB_SCHEMA_V2
+                and attempt.get("failure_type") not in VALID_FAILURE_TYPES
+            ):
+                raise TrackerError(f"{label} 的 failed 状态失败分类无效")
+            if (
+                job_version == JOB_SCHEMA_V2
+                and attempt.get("failure_type") in UNRESOLVED_FAILURE_TYPES
+                and attempt.get("termination_confirmed") is not True
+            ):
+                raise TrackerError(f"{label} 的 failed timeout/interrupted 必须确认调用已经终止")
             if artifact_id is not None:
                 raise TrackerError(f"{label} 的 failed 状态不能包含 artifact_id")
+        elif status == "unresolved":
+            if attempt.get("failure_type") not in UNRESOLVED_FAILURE_TYPES:
+                raise TrackerError(f"{label} 的 unresolved 状态失败分类必须是 timeout 或 interrupted")
+            if attempt.get("termination_confirmed") is not False:
+                raise TrackerError(f"{label} 的 unresolved 状态 termination_confirmed 必须是 false")
+            if not isinstance(attempt.get("failure_reason"), str) or not attempt["failure_reason"].strip():
+                raise TrackerError(f"{label} 的 unresolved 状态缺少失败原因")
+            if artifact_id is not None:
+                raise TrackerError(f"{label} 的 unresolved 状态不能包含 artifact_id")
         elif status in {"accepted", "rejected"}:
             if not isinstance(artifact_id, str) or not artifact_id.strip():
                 raise TrackerError(f"{label} 的 {status} 状态缺少 artifact_id")
@@ -994,11 +1252,14 @@ def _validate_job_contract(job: dict[str, Any], image: dict[str, Any]) -> dict[s
             if status == "accepted" and failure_reason is not None:
                 raise TrackerError(f"{label} 的 accepted 状态不能包含失败原因")
         elif artifact_id is not None:
-            raise TrackerError(f"{label} 的 calling 状态不能提前包含 artifact_id")
+            raise TrackerError(f"{label} 的未终结状态不能提前包含 artifact_id")
     calling_attempts = [item for item in attempts if item.get("status") == "calling"]
-    if len(calling_attempts) > 1:
-        raise TrackerError(f"图号 {image_id} 同时存在多个未归档渠道调用")
+    pending_attempts = [item for item in attempts if item.get("status") in PENDING_ATTEMPT_STATUSES]
+    if len(pending_attempts) > 1:
+        raise TrackerError(f"图号 {image_id} 同时存在多个尚未终结 attempt")
     return {
+        "job_schema_version": job_version,
+        "artifact_schema_version": JOB_TO_ARTIFACT_SCHEMA[job_version],
         "session_id": session_id,
         "main_session_id": main_session_id,
         "reference_ids": selected_ids,
@@ -1006,6 +1267,7 @@ def _validate_job_contract(job: dict[str, Any], image: dict[str, Any]) -> dict[s
         "execution": execution,
         "job_attempts": attempts,
         "calling_attempts": calling_attempts,
+        "pending_attempts": pending_attempts,
         "final_inspections": final_inspections,
     }
 
@@ -1019,14 +1281,7 @@ def _load_current_immutable_identity(
     manifest_path: str | Path, *, task_id: str, provider: str,
 ) -> str:
     job_path = _task_job_path(manifest_path, provider, task_id)
-    if not job_path.is_file():
-        raise TrackerError(f"任务 JSON 不存在：{job_path}")
-    try:
-        job = json.loads(job_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise TrackerError(f"任务 JSON 无法读取：{job_path}") from error
-    if not isinstance(job, dict) or job.get("schema_version") != JOB_SCHEMA_VERSION:
-        raise TrackerError(f"任务 JSON 版本无效：{job_path}")
+    _, job = _read_job_file(job_path)
     return _immutable_identity_sha256(job)
 
 
@@ -1035,14 +1290,8 @@ def _load_approved_job(
     product_name: str, image_id: str, image_type: str, allow_calling: bool = False,
 ) -> dict[str, Any]:
     job_path = _task_job_path(manifest_path, provider, task_id)
-    if not job_path.is_file():
-        raise TrackerError(f"任务 JSON 不存在：{job_path}")
-    try:
-        job = json.loads(job_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise TrackerError(f"任务 JSON 无法读取：{job_path}") from error
-    if not isinstance(job, dict) or job.get("schema_version") != JOB_SCHEMA_VERSION:
-        raise TrackerError(f"任务 JSON 版本无效：{job_path}")
+    _, job = _read_job_file(job_path)
+    job_version = _validate_job_version_and_policy(job)
     expected_product_folder = _provider_output_root(manifest_path, provider).parent.resolve()
     identity = (
         ("task_id", task_id),
@@ -1061,7 +1310,7 @@ def _load_approved_job(
     approval = job.get("approval")
     if not isinstance(approval, dict) or approval.get("status") != "approved":
         raise TrackerError("当前任务范围尚未获得用户明确批准")
-    if job.get("job_status") not in {"approved", "in_progress", "ready_for_validation", "complete"}:
+    if job.get("job_status") not in VALID_APPROVED_JOB_STATUSES:
         raise TrackerError("任务状态与已批准范围不一致")
     scope_version = approval.get("scope_version")
     scope_sha256 = approval.get("scope_sha256")
@@ -1112,11 +1361,39 @@ def _load_approved_job(
         raise TrackerError(f"图号 {image_id} 的已批准最终文件名前缀无效，应为：{expected_stem}")
     contract = _validate_job_contract(job, image)
     calling_attempts = contract["calling_attempts"]
-    if calling_attempts and not allow_calling:
-        raise TrackerError(f"图号 {image_id} 的渠道调用尚未归档")
+    pending_attempts = contract["pending_attempts"]
+    if pending_attempts and not allow_calling:
+        if job_version == JOB_SCHEMA_V1:
+            raise TrackerError(f"图号 {image_id} 的渠道调用尚未归档")
+        raise TrackerError(f"当前图号 {image_id} 仍有尚未终结 attempt")
+    task_pending_attempts = [
+        {"image_id": item.get("image_id"), "attempt": attempt}
+        for item in images
+        for attempt in (
+            item.get("execution", {}).get("attempts", [])
+            if isinstance(item.get("execution"), dict) else []
+        )
+        if isinstance(attempt, dict) and attempt.get("status") in PENDING_ATTEMPT_STATUSES
+    ]
+    task_calling_attempts = [
+        item for item in task_pending_attempts if item["attempt"].get("status") == "calling"
+    ]
+    if job_version == JOB_SCHEMA_V2:
+        if len(task_calling_attempts) > CONCURRENCY_POLICY["max_calling_attempts"]:
+            raise TrackerError("全任务 calling 数量超过固定并发上限 3")
+        if len(task_pending_attempts) > CONCURRENCY_POLICY["max_pending_attempts"]:
+            raise TrackerError("全任务 calling+unresolved+staged 待处理数量超过上限 3")
+        serial_pending = [
+            item for item in task_pending_attempts
+            if item["attempt"].get("dispatch_mode") == "serial"
+        ]
+        if serial_pending and len(task_pending_attempts) != 1:
+            raise TrackerError("serial attempt 必须全任务独占，需等待其他未终结 attempt 排空")
     return {
         "job_path": str(job_path),
         "job": job,
+        "job_schema_version": job_version,
+        "artifact_schema_version": JOB_TO_ARTIFACT_SCHEMA[job_version],
         "image": image,
         "scope_version": scope_version,
         "scope_sha256": scope_sha256,
@@ -1128,8 +1405,406 @@ def _load_approved_job(
         "execution": contract["execution"],
         "job_attempts": contract["job_attempts"],
         "calling_attempts": calling_attempts,
+        "pending_attempts": pending_attempts,
+        "current_pending_attempt": pending_attempts[0] if pending_attempts else None,
+        "task_pending_attempts": task_pending_attempts,
+        "task_calling_attempts": task_calling_attempts,
         "final_inspections": contract["final_inspections"],
     }
+
+
+def _validate_state_job_location(job: dict[str, Any], job_path: str | Path) -> None:
+    task_id = job.get("task_id")
+    if not isinstance(task_id, str) or not task_id.strip():
+        raise TrackerError("任务 JSON 的 task_id 必须是去空白后的非空字符串")
+    _validate_path_component(task_id, "任务编号 task_id")
+    product_folder = job.get("product_folder")
+    if (
+        not isinstance(product_folder, str) or not product_folder.strip()
+        or not Path(product_folder).is_absolute()
+    ):
+        raise TrackerError("任务 JSON 的 product_folder 必须是绝对产品文件夹路径")
+    expected = (
+        _absolute(product_folder) / "output" / "temp" / task_id / "_temu_job.json"
+    ).resolve()
+    if _absolute(job_path) != expected:
+        raise TrackerError(f"任务 JSON 与 task_id、product_folder 的规范位置不一致：{expected}")
+
+
+def _validate_state_job(
+    job: dict[str, Any], image_id: str, job_path: str | Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """验证状态命令所需的 v2 审批、素材和图号上下文。"""
+    if _validate_job_version_and_policy(job) != JOB_SCHEMA_V2:
+        raise TrackerError("reserve/stage/fail 仅适用于 schema v2 任务")
+    _validate_state_job_location(job, job_path)
+    approval = job.get("approval")
+    if not isinstance(approval, dict) or approval.get("status") != "approved":
+        raise TrackerError("当前任务范围尚未获得用户明确批准")
+    if job.get("job_status") not in VALID_APPROVED_JOB_STATUSES:
+        raise TrackerError("job_status 与已批准任务不一致")
+    confirmation_text = approval.get("confirmation_text")
+    if not isinstance(confirmation_text, str) or not confirmation_text.strip():
+        raise TrackerError("已批准任务缺少用户确认原文 confirmation_text")
+    _parse_datetime(approval.get("confirmed_at"), "用户确认时间 confirmed_at")
+    scope_version = approval.get("scope_version")
+    scope_sha256 = approval.get("scope_sha256")
+    if type(scope_version) is not int or scope_version < 1:
+        raise TrackerError("审批范围版本必须是正整数")
+    if not isinstance(scope_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", scope_sha256) is None:
+        raise TrackerError("审批范围 SHA256 无效")
+    if _canonical_sha256(_approval_scope_payload(job)) != scope_sha256:
+        raise TrackerError("任务内容与审批范围 SHA256 不一致，必须重新确认")
+    if approval.get("approved_scope_sha256") != scope_sha256:
+        raise TrackerError("当前任务范围尚未获得用户明确批准")
+    images = job.get("images")
+    if not isinstance(images, list):
+        raise TrackerError("任务 JSON 的 images 必须是对象数组")
+    image = next(
+        (item for item in images if isinstance(item, dict) and item.get("image_id") == image_id),
+        None,
+    )
+    if image is None:
+        raise TrackerError(f"任务 JSON 中不存在图号：{image_id}")
+    context = _validate_job_contract(job, image)
+    return image, context
+
+
+def _task_pending_attempts(job: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    pending: list[tuple[str, dict[str, Any]]] = []
+    for image in job.get("images", []):
+        if not isinstance(image, dict) or not isinstance(image.get("execution"), dict):
+            continue
+        for attempt in image["execution"].get("attempts", []):
+            if isinstance(attempt, dict) and attempt.get("status") in PENDING_ATTEMPT_STATUSES:
+                pending.append((str(image.get("image_id", "")), attempt))
+    return pending
+
+
+def _validate_task_pending_invariants(job: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """机械校验全任务未终结 attempt 的固定并发不变量。"""
+    pending = _task_pending_attempts(job)
+    per_image: dict[str, int] = {}
+    for image_id, attempt in pending:
+        dispatch_mode = attempt.get("dispatch_mode")
+        if dispatch_mode not in VALID_DISPATCH_MODES:
+            raise TrackerError(f"图号 {image_id} 的 pending dispatch_mode 无效")
+        per_image[image_id] = per_image.get(image_id, 0) + 1
+    duplicated = [image_id for image_id, count in per_image.items() if count > 1]
+    if duplicated:
+        raise TrackerError(f"同图最多只能有一个 pending attempt：{', '.join(sorted(duplicated))}")
+    if len(pending) > CONCURRENCY_POLICY["max_pending_attempts"]:
+        raise TrackerError("全任务 pending attempt 超过固定上限 3")
+    calling_count = sum(attempt.get("status") == "calling" for _, attempt in pending)
+    if calling_count > CONCURRENCY_POLICY["max_calling_attempts"]:
+        raise TrackerError("全任务 calling attempt 超过固定并发上限 3")
+    serial_pending = [attempt for _, attempt in pending if attempt.get("dispatch_mode") == "serial"]
+    if serial_pending and len(pending) != 1:
+        raise TrackerError("serial pending attempt 必须全任务独占")
+    return pending
+
+
+def _find_job_attempt(image: dict[str, Any], attempt_no: int) -> dict[str, Any]:
+    attempts = image.get("execution", {}).get("attempts", [])
+    matches = [
+        item for item in attempts
+        if isinstance(item, dict) and item.get("attempt_no") == attempt_no
+    ]
+    if len(matches) != 1:
+        raise TrackerError(f"图号 {image.get('image_id')} 找不到唯一 attempt {attempt_no}")
+    return matches[0]
+
+
+def reserve_attempt(
+    *, job_path: str | Path, image_id: str, attempt_no: int, dispatch_mode: str,
+    artifact_kind: str, direct_index: int | None, prompt_id: str,
+    prompt_path: str | Path, source_dir: str | Path, snapshot_path: str | Path,
+) -> dict[str, Any]:
+    """原子预留一次真实渠道调用，并登记完整调用输入。"""
+    if type(attempt_no) is not int or attempt_no < 1:
+        raise TrackerError("尝试号必须是大于 0 的整数")
+    if dispatch_mode not in VALID_DISPATCH_MODES:
+        raise TrackerError("dispatch_mode 必须是 parallel 或 serial")
+    if artifact_kind not in {"direct", "revision"}:
+        raise TrackerError("产物类型必须是 direct 或 revision")
+    if direct_index is not None and (
+        type(direct_index) is not int or direct_index not in {1, 2, 3}
+    ):
+        raise TrackerError("direct_index 必须为空或整数 1、2、3")
+    if artifact_kind == "revision" and direct_index is not None:
+        raise TrackerError("revision 不能填写 direct_index")
+    if not isinstance(prompt_id, str) or not prompt_id.strip():
+        raise TrackerError("prompt_id 必须是去空白后的非空字符串")
+    prompt, prompt_sha256 = _read_prompt(prompt_path)
+    directory = _absolute(source_dir)
+    if not directory.is_dir():
+        raise TrackerError(f"渠道来源目录不存在：{directory}")
+    snapshot, _ = _load_snapshot(snapshot_path, directory)
+    snapshot_sha256 = _sha256(snapshot)
+    job_file = _absolute(job_path)
+    expected_call_dir = job_file.parent / image_id
+    if prompt.parent != expected_call_dir.resolve() or snapshot.parent != expected_call_dir.resolve():
+        raise TrackerError(f"提示词和快照必须位于当前图号目录：{expected_call_dir.resolve()}")
+    started = datetime.now(timezone.utc)
+    snapshot_created = _parse_datetime(
+        json.loads(snapshot.read_text(encoding="utf-8")).get("created_at"), "快照创建时间",
+    )
+    if started < snapshot_created:
+        raise TrackerError("渠道调用开始时间不能早于调用前快照")
+
+    def mutate(job: dict[str, Any]) -> dict[str, Any]:
+        image, context = _validate_state_job(job, image_id, job_file)
+        pending = _validate_task_pending_invariants(job)
+        attempts = context["job_attempts"]
+        if any(item.get("attempt_no") == attempt_no for item in attempts):
+            raise TrackerError(f"attempt 尝试号重复：{attempt_no}")
+        existing_numbers = [
+            item.get("attempt_no") for item in attempts if type(item.get("attempt_no")) is int
+        ]
+        if existing_numbers and attempt_no <= max(existing_numbers):
+            raise TrackerError(f"尝试号必须递增，下一次至少为 {max(existing_numbers) + 1}")
+        latest_attempt = max(attempts, key=lambda item: item["attempt_no"]) if attempts else None
+        if (
+            latest_attempt is not None
+            and latest_attempt.get("status") == "failed"
+            and latest_attempt.get("failure_type") == "completed_without_path"
+            and dispatch_mode != "serial"
+        ):
+            raise TrackerError(
+                "最新 attempt 为 completed_without_path，下一 attempt 必须使用 serial 串行调用"
+            )
+        if any(item_image_id == image_id for item_image_id, _ in pending):
+            raise TrackerError(f"同图 {image_id} 仍有尚未终结 attempt")
+        if len(pending) >= CONCURRENCY_POLICY["max_pending_attempts"]:
+            raise TrackerError("全任务 calling+unresolved+staged 待处理 attempt 已达上限 3")
+        calling_count = sum(attempt.get("status") == "calling" for _, attempt in pending)
+        if calling_count >= CONCURRENCY_POLICY["max_calling_attempts"]:
+            raise TrackerError("全任务 calling 已达最多 3 个的并发上限")
+        if dispatch_mode == "serial" and pending:
+            raise TrackerError("serial attempt 必须等待全任务其他未终结 attempt 排空后独占执行")
+        if dispatch_mode == "parallel" and any(
+            attempt.get("dispatch_mode") == "serial" for _, attempt in pending
+        ):
+            raise TrackerError("已有 serial attempt 独占执行，不能开始 parallel 调用")
+        attempt = {
+            "attempt_no": attempt_no,
+            "approval_scope_version": job["approval"]["scope_version"],
+            "approval_scope_sha256": job["approval"]["scope_sha256"],
+            "session_id": context["session_id"],
+            "input_reference_ids": list(context["reference_ids"]),
+            "view_events": json.loads(json.dumps(context["view_events"], ensure_ascii=False)),
+            "prompt_id": prompt_id,
+            "prompt_path": str(prompt),
+            "prompt_sha256": prompt_sha256,
+            "source_dir": str(directory),
+            "snapshot_path": str(snapshot),
+            "snapshot_sha256": snapshot_sha256,
+            "call_started_at": started.isoformat(),
+            "dispatch_mode": dispatch_mode,
+            "artifact_kind": artifact_kind,
+            "direct_index": direct_index,
+            "status": "calling",
+        }
+        image["execution"]["attempts"].append(attempt)
+        image["execution"]["status"] = "generating"
+        return json.loads(json.dumps(attempt, ensure_ascii=False))
+
+    return _mutate_job_atomic(job_file, mutate)
+
+
+def _path_identity(path: str | Path) -> str:
+    return os.path.normcase(str(_absolute(path)))
+
+
+def _require_stage_identity(identity_path: Path, expected: dict[str, Any]) -> None:
+    try:
+        actual = json.loads(identity_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise TrackerError(f"staged 身份 sidecar 无法读取：{identity_path}") from error
+    if actual != expected:
+        raise TrackerError("staged sidecar 的 attempt、provider 来源或哈希身份与当前调用不一致")
+
+
+def stage_attempt(
+    *, job_path: str | Path, image_id: str, attempt_no: int,
+    source_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """把一次渠道结果排他固化到 attempt 专属 staged 副本。"""
+    job_file = _absolute(job_path)
+    staged_path = (job_file.parent / image_id / "staged" / f"{attempt_no}.png").resolve()
+    identity_path = staged_path.with_suffix(".identity.json")
+
+    def mutate(job: dict[str, Any]) -> dict[str, Any]:
+        image, _ = _validate_state_job(job, image_id, job_file)
+        _validate_task_pending_invariants(job)
+        attempt = _find_job_attempt(image, attempt_no)
+        if attempt.get("status") not in {"calling", "unresolved"}:
+            raise TrackerError(f"attempt {attempt_no} 已是 {attempt.get('status')} 状态，不能重复暂存")
+        if source_path is None:
+            raise TrackerError("v2 stage 必须提供渠道明确 source_path，来源模式只能是 tool_return")
+        source = _absolute(source_path)
+        source_dir_path = _absolute(attempt["source_dir"])
+        try:
+            source.relative_to(source_dir_path)
+        except ValueError as error:
+            raise TrackerError(f"明确来源路径位于绑定 source_dir 目录之外：{source}") from error
+        if not source.is_file() or _image_state(source) is None:
+            raise TrackerError(f"渠道明确返回的来源图片不存在或不可读：{source}")
+        provenance_mode = "tool_return"
+        if _image_format(source) != "PNG":
+            raise TrackerError("staged 只接受真实格式为 PNG 的渠道来源图片")
+        width, height = _image_size(source)
+        source_hash_before = _sha256(source)
+        source_identity = _path_identity(source)
+        for other_image in job.get("images", []):
+            if not isinstance(other_image, dict):
+                continue
+            for other in other_image.get("execution", {}).get("attempts", []):
+                if not isinstance(other, dict) or other is attempt:
+                    continue
+                other_path = other.get("provider_source_path")
+                if isinstance(other_path, str) and _path_identity(other_path) == source_identity:
+                    raise TrackerError("渠道来源路径重复，已经归属其他 attempt")
+                if other.get("provider_source_sha256") == source_hash_before:
+                    raise TrackerError("渠道来源哈希重复，不能归属多个 attempt")
+        staged = staged_path
+        identity = {
+            "schema_version": 1,
+            "job_path": str(job_file),
+            "task_id": job["task_id"],
+            "image_id": image_id,
+            "attempt_no": attempt_no,
+            "provider_source_path": str(source),
+            "provider_source_sha256": source_hash_before,
+            "staged_path": str(staged),
+            "staged_sha256": source_hash_before,
+        }
+        created = False
+        if staged.exists():
+            if not identity_path.is_file():
+                raise TrackerError(f"staged 孤儿缺少可验证身份 sidecar，拒绝收养：{staged}")
+            _require_stage_identity(identity_path, identity)
+            try:
+                if _sha256(staged) != source_hash_before:
+                    raise TrackerError("发现异哈希 staged 孤儿文件，拒绝覆盖")
+            except OSError as error:
+                raise TrackerError(f"staged 孤儿文件无法读取：{staged}") from error
+        else:
+            try:
+                if identity_path.exists():
+                    if not identity_path.is_file():
+                        raise TrackerError(f"staged 身份 sidecar 不是文件：{identity_path}")
+                    _require_stage_identity(identity_path, identity)
+                else:
+                    _write_exclusive(
+                        identity_path,
+                        (json.dumps(identity, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"),
+                    )
+                _copy_exclusive(source, staged)
+                created = True
+            except FileExistsError as error:
+                raise TrackerError(f"staged 身份 sidecar 或暂存目标已存在，必须验证后恢复：{staged}") from error
+            except OSError as error:
+                raise TrackerError(f"无法写入 staged 暂存副本：{staged}") from error
+        try:
+            source_hash_after = _sha256(source)
+            staged_hash = _sha256(staged)
+            if source_hash_before != source_hash_after or staged_hash != source_hash_before:
+                raise TrackerError("来源图片在暂存复制期间发生变化")
+        except Exception:
+            if created:
+                staged.unlink(missing_ok=True)
+            raise
+        attempt.update({
+            "status": "staged",
+            "provider_source_path": str(source),
+            "provider_source_sha256": source_hash_before,
+            "staged_path": str(staged),
+            "staged_sha256": staged_hash,
+            "staged_at": datetime.now(timezone.utc).isoformat(),
+            "provenance_mode": provenance_mode,
+            "width": width,
+            "height": height,
+        })
+        image["execution"]["status"] = "awaiting_review"
+        return json.loads(json.dumps(attempt, ensure_ascii=False))
+
+    result = _mutate_job_atomic(job_file, mutate)
+    try:
+        identity_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return result
+
+
+def fail_attempt(
+    *, job_path: str | Path, image_id: str, attempt_no: int,
+    failure_type: str, reason: str, termination_confirmed: bool = False,
+) -> dict[str, Any]:
+    """原子登记渠道失败；终止不明时保持 unresolved 并继续占槽。"""
+    if failure_type not in VALID_FAILURE_TYPES:
+        raise TrackerError(f"未知失败分类 failure_type：{failure_type}")
+    if not isinstance(reason, str) or not reason.strip():
+        raise TrackerError("失败原因必须是去空白后的非空字符串")
+    if type(termination_confirmed) is not bool:
+        raise TrackerError("termination_confirmed 必须是布尔值 bool")
+    normalized_reason = reason.strip()
+
+    job_file = _absolute(job_path)
+
+    def mutate(job: dict[str, Any]) -> dict[str, Any]:
+        image, _ = _validate_state_job(job, image_id, job_file)
+        attempt = _find_job_attempt(image, attempt_no)
+        current_status = attempt.get("status")
+        if current_status == "unresolved":
+            if failure_type in UNRESOLVED_FAILURE_TYPES:
+                if (
+                    attempt.get("failure_type") == failure_type
+                    and attempt.get("failure_reason") == normalized_reason
+                ):
+                    if not termination_confirmed:
+                        return json.loads(json.dumps(attempt, ensure_ascii=False))
+                    status = "failed"
+                elif not termination_confirmed:
+                    raise TrackerError("unresolved 终止不明记录只能完全相同地幂等重试，禁止覆盖")
+                else:
+                    status = "failed"
+            else:
+                if not termination_confirmed:
+                    raise TrackerError(
+                        "unresolved 转为确定失败前必须设置 termination_confirmed 确认调用已经终止"
+                    )
+                status = "failed"
+        elif current_status == "calling":
+            status = (
+                "unresolved"
+                if failure_type in UNRESOLVED_FAILURE_TYPES and not termination_confirmed
+                else "failed"
+            )
+        elif current_status == "staged":
+            if failure_type in UNRESOLVED_FAILURE_TYPES:
+                raise TrackerError("staged 暂存结果不能转回 timeout/interrupted 终止不明状态")
+            status = "failed"
+        else:
+            raise TrackerError(f"attempt {attempt_no} 已进入终态 {current_status}，不能改写")
+        recorded_at = datetime.now(timezone.utc).isoformat()
+        attempt["status"] = status
+        attempt["failure_type"] = failure_type
+        attempt["failure_reason"] = normalized_reason
+        attempt["failure_recorded_at"] = recorded_at
+        attempt["termination_confirmed"] = termination_confirmed
+        image["execution"]["status"] = "blocked" if status == "unresolved" else "generating"
+        image["execution"]["last_error"] = {
+            "attempt_no": attempt_no,
+            "status": status,
+            "failure_type": failure_type,
+            "failure_reason": normalized_reason,
+            "failure_recorded_at": recorded_at,
+            "termination_confirmed": termination_confirmed,
+        }
+        return json.loads(json.dumps(attempt, ensure_ascii=False))
+
+    return _mutate_job_atomic(job_file, mutate)
 
 
 def _load_snapshot(snapshot_path: str | Path, source_dir: str | Path) -> tuple[Path, dict[str, Any]]:
@@ -1234,17 +1909,358 @@ def _validate_parent(
     return parent
 
 
+V2_ATTEMPT_RECORD_FIELDS = (
+    "immutable_identity_sha256", "approval_scope_version", "approval_scope_sha256",
+    "session_id", "prompt_id",
+    "prompt_path", "prompt_sha256", "snapshot_path", "snapshot_sha256",
+    "call_started_at", "captured_at", "dispatch_mode", "artifact_kind", "direct_index",
+    "rejection_reason", "visual_checks", "derived_from_artifact_id",
+    "supersedes_artifact_id", "supersession_reason",
+    "provenance_mode", "provider_source_path", "provider_source_sha256",
+    "staged_at", "source_path", "source_sha256", "target_path", "target_sha256",
+    "width", "height",
+    "inspection_session_id", "inspection_checked_at", "inspection_notes",
+)
+
+
+def _stable_record_projection(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value for key, value in record.items()
+        if key not in {"artifact_id", "captured_at"}
+    }
+
+
+def _require_stable_record_match(
+    existing: dict[str, Any], expected: dict[str, Any], *, label: str,
+) -> None:
+    actual = _stable_record_projection(existing)
+    if actual == expected:
+        return
+    differing = sorted(
+        key for key in set(actual) | set(expected)
+        if actual.get(key) != expected.get(key) or (key in actual) != (key in expected)
+    )
+    raise TrackerError(f"{label}稳定字段冲突：{', '.join(differing)}")
+
+
+def _commit_v2_attempt_record(
+    job: dict[str, Any], job_path: str | Path, record: dict[str, Any],
+) -> dict[str, Any]:
+    """在已持有 job 锁时，把 v6 清单记录严格对账到 attempt。"""
+    image, _ = _validate_state_job(
+        job, str(record.get("image_id", "")), job_path,
+    )
+    attempt = _find_job_attempt(image, int(record.get("attempt_no", 0)))
+    if attempt.get("status") in {"accepted", "rejected"}:
+        mismatches = [
+            field for field in V2_ATTEMPT_RECORD_FIELDS
+            if attempt.get(field) != record.get(field)
+        ]
+        if (
+            attempt.get("artifact_id") != record.get("artifact_id")
+            or attempt.get("status") != record.get("status")
+            or mismatches
+        ):
+            raise TrackerError("attempt 终态与清单记录冲突，拒绝幂等覆盖")
+        expected_failure = (
+            record.get("rejection_reason") if record.get("status") == "rejected" else None
+        )
+        if attempt.get("failure_reason") != expected_failure:
+            raise TrackerError("attempt 终态失败原因与清单记录冲突")
+        return json.loads(json.dumps(attempt, ensure_ascii=False))
+    if attempt.get("status") != "staged":
+        raise TrackerError("v2 capture 只能把 staged attempt 更新为终态")
+
+    reserved_fields = (
+        "approval_scope_version", "approval_scope_sha256", "session_id",
+        "prompt_id", "prompt_path", "prompt_sha256", "snapshot_path",
+        "snapshot_sha256", "call_started_at", "dispatch_mode", "artifact_kind",
+        "provenance_mode", "provider_source_path", "provider_source_sha256", "staged_at",
+    )
+    mismatches = [
+        field for field in reserved_fields
+        if attempt.get(field) != record.get(field)
+    ]
+    if attempt.get("staged_path") != record.get("source_path"):
+        mismatches.append("source_path")
+    if attempt.get("staged_sha256") != record.get("source_sha256"):
+        mismatches.append("source_sha256")
+    planned_index = attempt.get("direct_index")
+    if planned_index is not None and record.get("status") == "accepted" and (
+        planned_index != record.get("direct_index")
+    ):
+        mismatches.append("direct_index")
+    if mismatches:
+        raise TrackerError(f"staged attempt 与清单记录冲突：{', '.join(sorted(set(mismatches)))}")
+
+    for field in V2_ATTEMPT_RECORD_FIELDS:
+        attempt[field] = record.get(field)
+    attempt["status"] = record["status"]
+    attempt["artifact_id"] = record["artifact_id"]
+    attempt["failure_reason"] = (
+        record.get("rejection_reason") if record.get("status") == "rejected" else None
+    )
+    image["execution"]["status"] = "awaiting_review"
+    return json.loads(json.dumps(attempt, ensure_ascii=False))
+
+
+def _capture_artifact_v2(
+    *, approval_context: dict[str, Any], snapshot_path: str | Path,
+    source_dir: str | Path, explicit_source: str | Path | None, destination: str | Path,
+    manifest_path: str | Path, task_id: str, provider: str, platform: str,
+    product_name: str, image_id: str, image_type: str, attempt_no: int,
+    direct_index: int | None, artifact_kind: str, prompt_id: str,
+    prompt_path: str | Path, status: str,
+    visual_checks: dict[str, bool] | None, inspection_session_id: str,
+    inspected_at: datetime, inspection_notes: str, rejection_reason: str | None,
+    captured_at: datetime, parent_artifact_id: str | None,
+    supersedes_artifact_id: str | None, supersession_reason: str | None,
+) -> dict[str, Any]:
+    if explicit_source is not None:
+        raise TrackerError("schema v2 capture 必须省略 source，只能消费已登记的 staged 副本")
+    matches = [
+        item for item in approval_context["job_attempts"]
+        if item.get("attempt_no") == attempt_no
+    ]
+    if len(matches) != 1 or matches[0].get("status") not in {"staged", "accepted", "rejected"}:
+        raise TrackerError("schema v2 capture 要求当前 attempt 已 staged 或已完成同一终态")
+    attempt = matches[0]
+    attempt_call_started_at = attempt.get("call_started_at")
+    started_at = _parse_datetime(attempt_call_started_at, "attempt 调用时间")
+    if started_at > captured_at:
+        raise TrackerError("attempt 渠道调用开始时间不能晚于本次捕获时间")
+    if inspected_at < started_at or inspected_at > captured_at:
+        raise TrackerError("检查时间必须位于 attempt 调用开始时间与本次捕获时间之间")
+    prompt, prompt_sha256 = _read_prompt(prompt_path)
+    snapshot, _ = _load_snapshot(snapshot_path, source_dir)
+    snapshot_sha256 = _sha256(snapshot)
+    expected_fields = (
+        (attempt.get("prompt_id"), prompt_id),
+        (attempt.get("prompt_path"), str(prompt)),
+        (attempt.get("prompt_sha256"), prompt_sha256),
+        (attempt.get("source_dir"), str(_absolute(source_dir))),
+        (attempt.get("snapshot_path"), str(snapshot)),
+        (attempt.get("snapshot_sha256"), snapshot_sha256),
+        (attempt.get("artifact_kind"), artifact_kind),
+    )
+    if any(actual != expected for actual, expected in expected_fields):
+        raise TrackerError("staged attempt 与 capture 的提示词、快照、来源目录或产物参数不一致")
+    planned_direct_index = attempt.get("direct_index")
+    if (
+        status == "accepted" and artifact_kind == "direct"
+        and planned_direct_index is not None and planned_direct_index != direct_index
+    ):
+        raise TrackerError("accepted direct 必须沿用 reserve 时已计划的 direct_index")
+    staged_at = _parse_datetime(attempt.get("staged_at"), "attempt staged_at")
+    if inspected_at < staged_at:
+        raise TrackerError("检查时间不得早于 staged 暂存时间")
+    source = _absolute(str(attempt.get("staged_path", "")))
+    if not source.is_file() or _sha256(source) != attempt.get("staged_sha256"):
+        raise TrackerError("staged 暂存副本哈希不匹配，可能已被篡改")
+    width, height = _image_size(source)
+    if status == "accepted" and _image_format(source) != "PNG":
+        raise TrackerError("通过验收的 direct 或 revision 必须是 PNG 图片")
+    if status == "accepted" and artifact_kind == "direct" and width != height:
+        raise TrackerError("通过验收的直出图必须为正方形")
+    target = _absolute(destination)
+    records = _load_manifest(manifest_path)
+    _require_matching_immutable_identity(
+        records, immutable_identity_sha256=approval_context["immutable_identity_sha256"],
+    )
+    recovery_matches = [
+        item for item in records
+        if item.get("task_id") == task_id and item.get("image_id") == image_id
+        and item.get("provider") == provider and item.get("attempt_no") == attempt_no
+        and item.get("artifact_kind") == artifact_kind
+    ]
+    current_identity = {
+        "task_id": task_id, "image_id": image_id, "provider": provider, "platform": platform,
+        "product_name": product_name, "image_type": image_type,
+        "approval_scope_version": approval_context["scope_version"],
+        "approval_scope_sha256": approval_context["scope_sha256"],
+    }
+    if any(
+        _same_image_group(item, task_id, image_id) and not _same_base_artifact_group(item, current_identity)
+        for item in records
+    ):
+        raise TrackerError("产物出现后不可变任务身份发生变化；必须建立新 task 并使用独立输出根目录和清单")
+    if artifact_kind == "revision" and not _has_complete_direct_set(records, current_identity):
+        raise TrackerError("登记渠道内 revision 前必须先取得三个有效直出版本")
+    parent = _validate_parent(
+        records, parent_artifact_id, current_identity=current_identity,
+    ) if artifact_kind == "revision" else None
+    inactive_ids = _inactive_artifact_ids(records)
+    superseded = None
+    if supersedes_artifact_id:
+        superseded = next((item for item in records if item.get("artifact_id") == supersedes_artifact_id), None)
+        if (
+            superseded is None or supersedes_artifact_id in inactive_ids
+            or superseded.get("artifact_kind") != "direct" or superseded.get("status") != "accepted"
+            or superseded.get("direct_index") != direct_index
+            or not _same_base_artifact_group(superseded, current_identity)
+        ):
+            raise TrackerError("被替换产物必须是同一图号和直出序号下当前有效的 accepted direct")
+    source_sha256_before = _sha256(source)
+    stable_record = {
+        "schema_version": ARTIFACT_SCHEMA_V6,
+        "task_id": task_id, "provider": provider, "platform": platform,
+        "product_name": product_name, "image_id": image_id, "image_type": image_type,
+        "immutable_identity_sha256": approval_context["immutable_identity_sha256"],
+        "approval_scope_version": approval_context["scope_version"],
+        "approval_scope_sha256": approval_context["scope_sha256"],
+        "session_id": approval_context["session_id"],
+        "attempt_no": attempt_no, "direct_index": direct_index,
+        "artifact_kind": artifact_kind, "prompt_id": prompt_id,
+        "prompt_path": str(prompt), "prompt_sha256": prompt_sha256,
+        "call_started_at": attempt_call_started_at,
+        "dispatch_mode": attempt["dispatch_mode"],
+        "provenance_mode": attempt["provenance_mode"],
+        "provider_source_path": attempt["provider_source_path"],
+        "provider_source_sha256": attempt["provider_source_sha256"],
+        "staged_at": attempt["staged_at"],
+        "source_path": str(source), "source_sha256": source_sha256_before,
+        "target_path": str(target), "target_sha256": source_sha256_before,
+        "width": width, "height": height, "status": status,
+        "visual_checks": dict(visual_checks or {}),
+        "inspection_session_id": inspection_session_id,
+        "inspection_checked_at": inspected_at.isoformat(),
+        "inspection_notes": inspection_notes, "rejection_reason": rejection_reason,
+        "derived_from_artifact_id": parent_artifact_id if parent else None,
+        "snapshot_path": str(snapshot), "snapshot_sha256": snapshot_sha256,
+        "supersedes_artifact_id": supersedes_artifact_id,
+        "supersession_reason": supersession_reason,
+    }
+    if recovery_matches:
+        if len(recovery_matches) != 1:
+            raise TrackerError("同一 v2 attempt 出现多条清单记录，无法幂等恢复")
+        existing = recovery_matches[0]
+        _require_stable_record_match(existing, stable_record, label="capture 重放")
+        if not target.is_file() or _sha256(target) != stable_record["target_sha256"]:
+            raise TrackerError("capture 重放的目标文件不存在或哈希冲突")
+        was_terminal = attempt.get("status") in {"accepted", "rejected"}
+        _commit_v2_attempt_record(
+            approval_context["job"], approval_context["job_path"], existing,
+        )
+        if not was_terminal:
+            _write_job_atomic(approval_context["job_path"], approval_context["job"])
+        return existing
+    if attempt.get("status") in {"accepted", "rejected"}:
+        raise TrackerError("attempt 已是终态但缺少唯一清单记录，不能恢复")
+    if any(item.get("snapshot_path") and _absolute(item["snapshot_path"]) == snapshot for item in records):
+        raise TrackerError("同一调用前快照已被使用，必须为每次渠道调用建立唯一快照")
+    if any(item.get("target_path") and _absolute(item["target_path"]) == target for item in records):
+        raise TrackerError(f"目标路径已在清单中登记，拒绝覆盖：{target}")
+    if status == "accepted" and artifact_kind == "direct":
+        accepted_directs = [
+            item for item in records
+            if _same_artifact_group(item, current_identity)
+            and item.get("artifact_kind") == "direct" and item.get("status") == "accepted"
+            and item.get("artifact_id") not in inactive_ids
+        ]
+        existing_index = [item for item in accepted_directs if item.get("direct_index") == direct_index]
+        if existing_index and (superseded is None or existing_index != [superseded]):
+            raise TrackerError(f"direct{direct_index:02d} 已有有效直出版本")
+        all_accepted = [
+            item for item in records
+            if _same_base_artifact_group(item, current_identity)
+            and item.get("artifact_kind") == "direct" and item.get("status") == "accepted"
+        ]
+        if any(item.get("target_sha256") == source_sha256_before for item in all_accepted):
+            raise TrackerError("图片哈希重复，不能作为新的有效直出版本")
+        if any(item.get("prompt_sha256") == prompt_sha256 for item in all_accepted):
+            raise TrackerError("提示词哈希重复，不能作为新的有效直出版本")
+    manifest = _absolute(manifest_path)
+    try:
+        manifest_before = manifest.read_bytes() if manifest.exists() else None
+    except OSError as error:
+        raise TrackerError(f"清单无法读取：{manifest}") from error
+    target_created = False
+    if target.exists():
+        if not target.is_file() or _sha256(target) != source_sha256_before:
+            raise TrackerError(f"发现异哈希 capture 目标孤儿，拒绝覆盖：{target}")
+    else:
+        try:
+            _copy_exclusive(source, target)
+            target_created = True
+        except FileExistsError as error:
+            raise TrackerError(f"目标文件已存在，拒绝覆盖：{target}") from error
+        except OSError as error:
+            raise TrackerError(f"无法保存产物：{target}") from error
+    try:
+        if _sha256(source) != source_sha256_before:
+            raise TrackerError("staged 暂存副本在捕获期间发生变化")
+        target_sha256 = _sha256(target)
+        if target_sha256 != source_sha256_before:
+            raise TrackerError("目标副本与 staged 暂存副本哈希不一致")
+        record = dict(stable_record)
+        record["artifact_id"] = str(uuid.uuid4())
+        record["captured_at"] = captured_at.isoformat()
+        _append_manifest(manifest_path, record)
+        _commit_v2_attempt_record(
+            approval_context["job"], approval_context["job_path"], record,
+        )
+        _write_job_atomic(approval_context["job_path"], approval_context["job"])
+        return record
+    except Exception as error:
+        rollback_error: Exception | None = None
+        try:
+            _restore_manifest(manifest, manifest_before)
+        except Exception as caught:
+            rollback_error = caught
+        if target_created:
+            try:
+                target.unlink(missing_ok=True)
+            except OSError as caught:
+                rollback_error = rollback_error or caught
+        if rollback_error is not None:
+            raise TrackerError("capture 同步失败且本次目标或清单回滚失败") from rollback_error
+        if isinstance(error, OSError):
+            raise TrackerError("捕获产物期间文件发生变化或无法读取") from error
+        raise
+
+
 def capture_artifact(
     *, snapshot_path: str | Path, source_dir: str | Path, explicit_source: str | Path | None,
     destination: str | Path, manifest_path: str | Path, task_id: str, provider: str,
     platform: str, product_name: str, image_id: str, image_type: str, attempt_no: int,
     direct_index: int | None, artifact_kind: str, prompt_id: str, prompt_path: str | Path,
-    call_started_at: str, status: str, visual_checks: dict[str, bool] | None,
+    call_started_at: str | None = None, status: str, visual_checks: dict[str, bool] | None,
     inspection_session_id: str, inspection_checked_at: str, inspection_notes: str,
     rejection_reason: str | None, parent_artifact_id: str | None = None,
     supersedes_artifact_id: str | None = None, supersession_reason: str | None = None,
 ) -> dict[str, Any]:
-    """复制一次渠道产物，并在清单成功追加后保留目标文件。"""
+    """以 manifest -> job 固定锁顺序提交一次 capture。"""
+    job_path = _task_job_path(manifest_path, provider, task_id)
+    with _manifest_lock(manifest_path):
+        with _job_lock(job_path):
+            return _capture_artifact_locked(
+                snapshot_path=snapshot_path, source_dir=source_dir,
+                explicit_source=explicit_source, destination=destination,
+                manifest_path=manifest_path, task_id=task_id, provider=provider,
+                platform=platform, product_name=product_name, image_id=image_id,
+                image_type=image_type, attempt_no=attempt_no, direct_index=direct_index,
+                artifact_kind=artifact_kind, prompt_id=prompt_id, prompt_path=prompt_path,
+                call_started_at=call_started_at, status=status, visual_checks=visual_checks,
+                inspection_session_id=inspection_session_id,
+                inspection_checked_at=inspection_checked_at,
+                inspection_notes=inspection_notes, rejection_reason=rejection_reason,
+                parent_artifact_id=parent_artifact_id,
+                supersedes_artifact_id=supersedes_artifact_id,
+                supersession_reason=supersession_reason,
+            )
+
+
+def _capture_artifact_locked(
+    *, snapshot_path: str | Path, source_dir: str | Path, explicit_source: str | Path | None,
+    destination: str | Path, manifest_path: str | Path, task_id: str, provider: str,
+    platform: str, product_name: str, image_id: str, image_type: str, attempt_no: int,
+    direct_index: int | None, artifact_kind: str, prompt_id: str, prompt_path: str | Path,
+    call_started_at: str | None, status: str, visual_checks: dict[str, bool] | None,
+    inspection_session_id: str, inspection_checked_at: str, inspection_notes: str,
+    rejection_reason: str | None, parent_artifact_id: str | None = None,
+    supersedes_artifact_id: str | None = None, supersession_reason: str | None = None,
+) -> dict[str, Any]:
+    """调用方已持有 manifest 和 job 锁时提交 capture。"""
     _check_capture_inputs(
         artifact_kind=artifact_kind, status=status, direct_index=direct_index,
         visual_checks=visual_checks, rejection_reason=rejection_reason,
@@ -1255,15 +2271,10 @@ def capture_artifact(
         raise TrackerError("检查 Subagent 编号必须是非空字符串")
     if not isinstance(inspection_notes, str) or not inspection_notes.strip():
         raise TrackerError("检查结论必须是去空白后的非空字符串")
-    if not all((task_id, provider, platform, product_name, image_id, image_type, prompt_id, call_started_at)):
-        raise TrackerError("任务、渠道、产品、图号、提示词和调用时间不能为空")
-    started_at = _parse_datetime(call_started_at, "渠道调用开始时间")
+    if not all((task_id, provider, platform, product_name, image_id, image_type, prompt_id)):
+        raise TrackerError("任务、渠道、产品、图号和提示词不能为空")
     captured_at = datetime.now(timezone.utc)
     inspected_at = _parse_datetime(inspection_checked_at, "检查时间")
-    if started_at > captured_at:
-        raise TrackerError("渠道调用开始时间不能晚于本次捕获时间")
-    if inspected_at < started_at or inspected_at > captured_at:
-        raise TrackerError("检查时间必须位于渠道调用开始时间与本次捕获时间之间")
     if type(attempt_no) is not int or attempt_no < 1:
         raise TrackerError("尝试号必须是大于 0 的整数")
     if supersedes_artifact_id and not supersession_reason:
@@ -1293,6 +2304,45 @@ def capture_artifact(
         raise TrackerError("检查 Subagent 必须与生成 Session 不同")
     if inspection_session_id == approval_context["main_session_id"]:
         raise TrackerError("检查 Subagent 必须与主 Session 不同，主 Session 不得代检")
+    if approval_context["job_schema_version"] == JOB_SCHEMA_V2:
+        if call_started_at is not None:
+            raise TrackerError("schema v2 capture 必须省略外部 call_started_at，并使用 attempt 规范时间")
+        return _capture_artifact_v2(
+            approval_context=approval_context,
+            snapshot_path=snapshot_path,
+            source_dir=source_dir,
+            explicit_source=explicit_source,
+            destination=destination,
+            manifest_path=manifest_path,
+            task_id=task_id,
+            provider=provider,
+            platform=platform,
+            product_name=product_name,
+            image_id=image_id,
+            image_type=image_type,
+            attempt_no=attempt_no,
+            direct_index=direct_index,
+            artifact_kind=artifact_kind,
+            prompt_id=prompt_id,
+            prompt_path=prompt_path,
+            status=status,
+            visual_checks=visual_checks,
+            inspection_session_id=inspection_session_id,
+            inspected_at=inspected_at,
+            inspection_notes=inspection_notes,
+            rejection_reason=rejection_reason,
+            captured_at=captured_at,
+            parent_artifact_id=parent_artifact_id,
+            supersedes_artifact_id=supersedes_artifact_id,
+            supersession_reason=supersession_reason,
+        )
+    if not isinstance(call_started_at, str) or not call_started_at.strip():
+        raise TrackerError("schema v1 capture 必须提供渠道调用开始时间 call_started_at")
+    started_at = _parse_datetime(call_started_at, "渠道调用开始时间")
+    if started_at > captured_at:
+        raise TrackerError("渠道调用开始时间不能晚于本次捕获时间")
+    if inspected_at < started_at or inspected_at > captured_at:
+        raise TrackerError("检查时间必须位于渠道调用开始时间与本次捕获时间之间")
     if (
         approval_context["calling_attempts"]
         and approval_context["calling_attempts"][0].get("attempt_no") != attempt_no
@@ -1438,8 +2488,11 @@ def capture_artifact(
     except OSError as error:
         raise TrackerError(f"无法保存产物：{target}") from error
     manifest = _absolute(manifest_path)
-    manifest_existed = manifest.exists()
-    manifest_size = manifest.stat().st_size if manifest_existed else 0
+    try:
+        manifest_before = manifest.read_bytes() if manifest.exists() else None
+    except OSError as error:
+        target.unlink(missing_ok=True)
+        raise TrackerError(f"清单无法读取：{manifest}") from error
     try:
         source_sha256_after = _sha256(source)
         target_sha256 = _sha256(target)
@@ -1450,7 +2503,7 @@ def capture_artifact(
         if _sha256(snapshot) != snapshot_sha256:
             raise TrackerError("调用前快照在捕获期间发生变化，已撤销本次产物")
         record = {
-            "schema_version": ARTIFACT_SCHEMA_VERSION,
+            "schema_version": approval_context["artifact_schema_version"],
             "artifact_id": str(uuid.uuid4()),
             "task_id": task_id,
             "provider": provider,
@@ -1491,7 +2544,7 @@ def capture_artifact(
         }
         _append_manifest(manifest_path, record)
     except Exception as error:
-        _restore_manifest(manifest, manifest_existed, manifest_size)
+        _restore_manifest(manifest, manifest_before)
         try:
             target.unlink(missing_ok=True)
         except OSError:
@@ -1595,6 +2648,13 @@ def _verify_record_semantics(
             inspection_time = _parse_datetime(record.get("inspection_checked_at"), "检查时间")
             if started is not None and inspection_time < started:
                 errors.append(f"产物 {identifier} 的检查时间不能早于调用时间")
+            if record.get("schema_version") == ARTIFACT_SCHEMA_V6:
+                try:
+                    staged_time = _parse_datetime(record.get("staged_at"), "staged_at")
+                    if inspection_time < staged_time:
+                        errors.append(f"产物 {identifier} 的检查时间不能早于 staged_at 暂存时间")
+                except TrackerError as error:
+                    errors.append(f"产物 {identifier} 的 staged_at 无效：{error}")
             if captured is not None and inspection_time > captured:
                 errors.append(f"产物 {identifier} 的检查时间不能晚于捕获时间")
         except TrackerError as error:
@@ -1603,13 +2663,17 @@ def _verify_record_semantics(
         for field in ("inspection_session_id", "inspection_checked_at", "inspection_notes"):
             if record.get(field) is not None:
                 errors.append(f"最终图 {identifier} 的 {field} 必须为空；独立终检只登记在任务 JSON")
+    status = record.get("status")
+    kind = record.get("artifact_kind")
     checks = record.get("visual_checks")
-    if not isinstance(checks, dict) or not all(
+    is_v6_final = record.get("schema_version") == ARTIFACT_SCHEMA_V6 and kind == "final"
+    if is_v6_final:
+        if checks is not None:
+            errors.append(f"v6 final {identifier} 的 visual_checks 必须为 null")
+    elif not isinstance(checks, dict) or not all(
         isinstance(key, str) and type(value) is bool for key, value in checks.items()
     ) or REQUIRED_VISUAL_CHECKS - set(checks):
         errors.append(f"产物 {identifier} 的 visual_checks 必须是完整布尔字典")
-    status = record.get("status")
-    kind = record.get("artifact_kind")
     if status == "accepted" and kind == "direct" and (
         type(record.get("direct_index")) is not int or record.get("direct_index") not in {1, 2, 3}
     ):
@@ -1617,7 +2681,7 @@ def _verify_record_semantics(
     rejection_reason = record.get("rejection_reason")
     if status == "accepted" and kind in {"direct", "revision"} and rejection_reason is not None:
         errors.append(f"通过验收的产物 {identifier} 的拒绝原因必须为 null")
-    if status == "accepted" and isinstance(checks, dict) and not all(
+    if not is_v6_final and status == "accepted" and isinstance(checks, dict) and not all(
         checks.get(key) is True for key in REQUIRED_VISUAL_CHECKS
     ):
         errors.append(f"通过验收的产物 {identifier} 的 visual_checks 与 accepted 状态不相符")
@@ -1685,7 +2749,25 @@ def _verify_execution_reconciliation(
             and attempt.get("failure_reason") != record.get("rejection_reason")
         ):
             errors.append(f"图号 {image_id} 的 attempt {attempt.get('attempt_no')} 失败原因与清单不一致")
-        for field in ATTEMPT_RECORD_FIELDS:
+        reconciliation_fields = ATTEMPT_RECORD_FIELDS
+        if record.get("schema_version") == ARTIFACT_SCHEMA_V6:
+            reconciliation_fields += (
+                "immutable_identity_sha256", "captured_at", "dispatch_mode",
+                "provider_source_path", "provider_source_sha256", "staged_at",
+                "visual_checks", "derived_from_artifact_id",
+                "supersedes_artifact_id", "supersession_reason",
+            )
+            provider_path = record.get("provider_source_path")
+            source_dir = attempt.get("source_dir")
+            if isinstance(provider_path, str) and isinstance(source_dir, str):
+                try:
+                    _absolute(provider_path).relative_to(_absolute(source_dir))
+                except ValueError:
+                    errors.append(
+                        f"图号 {image_id} 的清单 provider_source_path 位于对应 attempt "
+                        "绑定 source_dir 目录之外"
+                    )
+        for field in reconciliation_fields:
             if attempt.get(field) != record.get(field):
                 errors.append(
                     f"图号 {image_id} 的 attempt {attempt.get('attempt_no')} 字段 {field} 与清单不一致"
@@ -1967,6 +3049,7 @@ def verify_manifest(manifest_path: str | Path) -> dict[str, Any]:
                 product_name=str(record.get("product_name", "")),
                 image_id=str(record.get("image_id", "")),
                 image_type=str(record.get("image_type", "")),
+                allow_calling=True,
             )
         except TrackerError as error:
             approval_contexts[base_group] = None
@@ -1984,6 +3067,7 @@ def verify_manifest(manifest_path: str | Path) -> dict[str, Any]:
                         platform=task_identity[2], product_name=task_identity[3],
                         image_id=str(image.get("image_id", "")),
                         image_type=str(image.get("image_type", "")),
+                        allow_calling=True,
                     )
                 except TrackerError as error:
                     approval_contexts[required_base] = None
@@ -1996,15 +3080,27 @@ def verify_manifest(manifest_path: str | Path) -> dict[str, Any]:
                         str(image_context["scope_version"]), str(image_context["scope_sha256"]),
                     ))
     used_snapshots: set[str] = set()
+    used_provider_paths: set[str] = set()
+    used_provider_hashes: set[str] = set()
     last_attempt_by_group: dict[tuple[str, str, str, str, str, str], int] = {}
     for record in records:
         identifier = record.get("artifact_id", "未知产物")
-        missing = sorted(field for field in REQUIRED_RECORD_FIELDS if field not in record)
+        record_schema = record.get("schema_version")
+        kind = record.get("artifact_kind")
+        required_fields = set(REQUIRED_RECORD_FIELDS_V5)
+        if record_schema == ARTIFACT_SCHEMA_V6 and kind in {"direct", "revision"}:
+            required_fields.update({
+                "provider_source_path", "provider_source_sha256", "staged_at", "dispatch_mode",
+            })
+        missing = sorted(field for field in required_fields if field not in record)
         if missing:
             errors.append(f"产物 {identifier} 缺少必填字段：{', '.join(missing)}")
-        if record.get("schema_version") != ARTIFACT_SCHEMA_VERSION:
+        if record_schema not in {ARTIFACT_SCHEMA_V5, ARTIFACT_SCHEMA_V6}:
             errors.append(f"产物 {identifier} 的 schema_version 无效")
-        kind = record.get("artifact_kind")
+        if record_schema == ARTIFACT_SCHEMA_V5 and "dispatch_mode" in record:
+            errors.append(f"v5 产物 {identifier} 不能包含 dispatch_mode")
+        if record_schema == ARTIFACT_SCHEMA_V6 and kind == "final" and "dispatch_mode" in record:
+            errors.append(f"v6 final {identifier} 必须从父级推导 dispatch_mode，不能重复写入")
         status = record.get("status")
         provenance = record.get("provenance_mode")
         if kind not in VALID_KINDS:
@@ -2021,7 +3117,9 @@ def verify_manifest(manifest_path: str | Path) -> dict[str, Any]:
             errors.append(f"作废产物 {identifier} 缺少拒绝原因")
 
         if kind == "direct":
-            if provenance not in {"tool_return", "snapshot_diff"}:
+            if record_schema == ARTIFACT_SCHEMA_V6 and provenance != "tool_return":
+                errors.append(f"v6 直出 {identifier} 的来源模式必须是 tool_return")
+            elif record_schema != ARTIFACT_SCHEMA_V6 and provenance not in {"tool_return", "snapshot_diff"}:
                 errors.append(f"直出 {identifier} 的来源模式违反状态机")
             if record.get("derived_from_artifact_id") is not None:
                 errors.append(f"直出 {identifier} 的状态机不允许派生父级")
@@ -2033,7 +3131,9 @@ def verify_manifest(manifest_path: str | Path) -> dict[str, Any]:
             if status == "rejected" and record.get("direct_index") is not None:
                 errors.append(f"作废直出 {identifier} 的状态机要求 direct_index 为空")
         elif kind == "revision":
-            if provenance not in {"tool_return", "snapshot_diff"}:
+            if record_schema == ARTIFACT_SCHEMA_V6 and provenance != "tool_return":
+                errors.append(f"v6 修订产物 {identifier} 的来源模式必须是 tool_return")
+            elif record_schema != ARTIFACT_SCHEMA_V6 and provenance not in {"tool_return", "snapshot_diff"}:
                 errors.append(f"修订产物 {identifier} 的来源模式违反状态机")
             if record.get("direct_index") is not None:
                 errors.append(f"修订产物 {identifier} 的状态机要求 direct_index 为空")
@@ -2047,11 +3147,41 @@ def verify_manifest(manifest_path: str | Path) -> dict[str, Any]:
             if record.get("supersedes_artifact_id") is not None:
                 errors.append(f"最终图 {identifier} 不能替换 direct")
 
+        if record_schema == ARTIFACT_SCHEMA_V6 and kind in {"direct", "revision"}:
+            if record.get("dispatch_mode") not in VALID_DISPATCH_MODES:
+                errors.append(f"v6 产物 {identifier} 的 dispatch_mode 无效")
+            provider_path = record.get("provider_source_path")
+            provider_hash = record.get("provider_source_sha256")
+            if not isinstance(provider_path, str) or not Path(provider_path).is_absolute():
+                errors.append(f"v6 产物 {identifier} 的 provider_source_path 必须是绝对路径")
+            else:
+                normalized_provider_path = _path_identity(provider_path)
+                if normalized_provider_path in used_provider_paths:
+                    errors.append(f"渠道来源 provider_source_path 路径重复：{provider_path}")
+                used_provider_paths.add(normalized_provider_path)
+            if not isinstance(provider_hash, str) or re.fullmatch(r"[0-9a-f]{64}", provider_hash) is None:
+                errors.append(f"v6 产物 {identifier} 的 provider_source_sha256 无效")
+            else:
+                if provider_hash in used_provider_hashes:
+                    errors.append(f"渠道来源 provider_source_sha256 哈希重复：{provider_hash}")
+                used_provider_hashes.add(provider_hash)
+            try:
+                _parse_datetime(record.get("staged_at"), "staged_at")
+            except TrackerError as error:
+                errors.append(f"v6 产物 {identifier} 的 staged_at 无效：{error}")
+
         group = _record_group(record)
         base_group = _record_base_group(record)
         groups.setdefault(group, []).append(record)
         task_image_groups.setdefault((base_group[0], base_group[1]), set()).add(base_group)
         approval_context = approval_contexts.get(base_group)
+        if (
+            approval_context is not None
+            and record_schema != approval_context.get("artifact_schema_version")
+        ):
+            errors.append(
+                f"产物 {identifier} 的 schema_version 与当前任务版本不一致"
+            )
         _verify_record_semantics(record, approval_context, errors)
         if (
             approval_context is not None
@@ -2133,9 +3263,27 @@ def verify_manifest(manifest_path: str | Path) -> dict[str, Any]:
                 f"任务 {task_image[0]} 图号 {task_image[1]} 的不可变任务身份发生变化，必须建立新 task"
             )
 
+    checked_pending_tasks: set[tuple[str, str]] = set()
     for context in approval_contexts.values():
         if context is not None:
             _verify_execution_reconciliation(context, records, errors)
+            task_key = (
+                str(context["job"].get("task_id", "")),
+                str(context["job"].get("provider", "")),
+            )
+            if task_key in checked_pending_tasks:
+                continue
+            checked_pending_tasks.add(task_key)
+            pending = context.get("task_pending_attempts", [])
+            if pending:
+                if context.get("job_schema_version") == JOB_SCHEMA_V1:
+                    errors.append(f"任务 {task_key[0]} 仍有渠道调用尚未归档")
+                else:
+                    details = ", ".join(
+                        f"图号 {item['image_id']} {item['attempt'].get('status')}"
+                        for item in pending
+                    )
+                    errors.append(f"全任务尚未排空未终结 attempt：{details}")
 
     for record in records:
         identifier = record.get("artifact_id")
@@ -2251,13 +3399,40 @@ def finalize_artifact(
     *, manifest_path: str | Path, source_artifact_id: str, destination: str | Path,
     size: int = 1000,
 ) -> dict[str, Any]:
+    """以 manifest -> job 固定锁顺序派生最终 PNG。"""
+    manifest = _absolute(manifest_path)
+    with _manifest_lock(manifest):
+        records = _load_manifest(manifest)
+        source_record = next(
+            (item for item in records if item.get("artifact_id") == source_artifact_id),
+            None,
+        )
+        if source_record is None:
+            return _finalize_artifact_locked(
+                manifest_path=manifest, source_artifact_id=source_artifact_id,
+                destination=destination, size=size,
+            )
+        job_path = _task_job_path(
+            manifest,
+            str(source_record.get("provider", "")),
+            str(source_record.get("task_id", "")),
+        )
+        with _job_lock(job_path):
+            return _finalize_artifact_locked(
+                manifest_path=manifest, source_artifact_id=source_artifact_id,
+                destination=destination, size=size,
+            )
+
+
+def _finalize_artifact_locked(
+    *, manifest_path: str | Path, source_artifact_id: str, destination: str | Path,
+    size: int = 1000,
+) -> dict[str, Any]:
     """从通过验收的 direct 或 revision 排他派生最终 PNG。"""
     if size != 1000:
         raise TrackerError("TEMU 最终图尺寸必须为 1000x1000")
     manifest = _absolute(manifest_path)
     records = _load_manifest(manifest_path)
-    manifest_existed = manifest.exists()
-    manifest_size = manifest.stat().st_size if manifest_existed else 0
     source_record = next((item for item in records if item.get("artifact_id") == source_artifact_id), None)
     if source_record is None:
         raise TrackerError(f"找不到来源产物：{source_artifact_id}")
@@ -2295,28 +3470,12 @@ def finalize_artifact(
         raise TrackerError("来源产物不存在或哈希不匹配")
     target = _absolute(destination)
     _validate_final_filename(target, source_record)
+    _validate_final_directory(target, manifest_path, str(source_record.get("provider", "")))
     base_name = _artifact_base_name(
         str(source_record.get("product_name", "")),
         str(source_record.get("image_type", "")),
         str(source_record.get("image_id", "")),
     )
-    final_history = [
-        item for item in records
-        if item.get("artifact_kind") == "final" and _same_base_artifact_group(item, source_record)
-    ]
-    for version, item in enumerate(final_history, start=1):
-        expected_name = f"{base_name}_v{version:02d}.png"
-        if _absolute(str(item.get("target_path", ""))).name != expected_name:
-            raise TrackerError(f"清单中的最终版本历史不连续，应先修复：{expected_name}")
-    final_version = len(final_history) + 1
-    expected_final_name = (
-        f"{base_name}_v{final_version:02d}.png"
-    )
-    if target.name != expected_final_name:
-        raise TrackerError(f"最终版本必须连续递增，本次应为：{expected_final_name}")
-    _validate_final_directory(target, manifest_path, str(source_record.get("provider", "")))
-    if target.exists() or any(item.get("target_path") and _absolute(item["target_path"]) == target for item in records):
-        raise TrackerError(f"最终图目标已存在，拒绝覆盖：{target}")
     try:
         with Image.open(source) as image:
             if image.size[0] != image.size[1]:
@@ -2325,64 +3484,131 @@ def finalize_artifact(
             result = converted.resize((size, size), Image.Resampling.LANCZOS)
             buffer = io.BytesIO()
             result.save(buffer, format="PNG")
-        _write_exclusive(target, buffer.getvalue())
-    except FileExistsError as error:
-        raise TrackerError(f"最终图目标已存在，拒绝覆盖：{target}") from error
+        final_bytes = buffer.getvalue()
+        if _sha256(source) != source_hash_before:
+            raise TrackerError("来源图片在生成期间发生变化，拒绝登记最终图")
     except (OSError, UnidentifiedImageError) as error:
         raise TrackerError(f"无法生成最终图：{target}") from error
+
+    target_sha256 = hashlib.sha256(final_bytes).hexdigest()
+    stable_record = {
+        "schema_version": approval_context["artifact_schema_version"],
+        "task_id": source_record.get("task_id"),
+        "provider": source_record.get("provider"),
+        "platform": source_record.get("platform"),
+        "product_name": source_record.get("product_name"),
+        "image_id": source_record.get("image_id"),
+        "image_type": source_record.get("image_type"),
+        "immutable_identity_sha256": approval_context["immutable_identity_sha256"],
+        "approval_scope_version": approval_context["scope_version"],
+        "approval_scope_sha256": approval_context["scope_sha256"],
+        "session_id": source_record.get("session_id"),
+        "attempt_no": source_record.get("attempt_no"),
+        "direct_index": None,
+        "artifact_kind": "final",
+        "prompt_id": source_record.get("prompt_id"),
+        "prompt_path": source_record.get("prompt_path"),
+        "prompt_sha256": source_record.get("prompt_sha256"),
+        "call_started_at": source_record.get("call_started_at"),
+        "provenance_mode": "derivation",
+        "source_path": str(source),
+        "source_sha256": source_hash_before,
+        "target_path": str(target),
+        "target_sha256": target_sha256,
+        "width": size,
+        "height": size,
+        "status": "accepted",
+        "visual_checks": (
+            None
+            if approval_context["artifact_schema_version"] == ARTIFACT_SCHEMA_V6
+            else dict(source_record.get("visual_checks") or {})
+        ),
+        "inspection_session_id": None,
+        "inspection_checked_at": None,
+        "inspection_notes": None,
+        "rejection_reason": None,
+        "derived_from_artifact_id": source_artifact_id,
+        "snapshot_path": source_record.get("snapshot_path"),
+        "snapshot_sha256": source_record.get("snapshot_sha256"),
+        "supersedes_artifact_id": None,
+        "supersession_reason": None,
+    }
+    final_history = [
+        item for item in records
+        if item.get("artifact_kind") == "final" and _same_base_artifact_group(item, source_record)
+    ]
+    for version, item in enumerate(final_history, start=1):
+        expected_name = f"{base_name}_v{version:02d}.png"
+        if _absolute(str(item.get("target_path", ""))).name != expected_name:
+            raise TrackerError(f"清单中的最终版本历史不连续，应先修复：{expected_name}")
+
+    path_matches = [
+        item for item in records
+        if item.get("target_path") and _absolute(str(item["target_path"])) == target
+    ]
+    if path_matches:
+        if len(path_matches) != 1 or path_matches[0].get("artifact_kind") != "final":
+            raise TrackerError(f"最终图目标路径已被清单使用，无法幂等恢复：{target}")
+        existing = path_matches[0]
+        _require_stable_record_match(existing, stable_record, label="finalize 重放")
+        try:
+            if not target.is_file() or _sha256(target) != target_sha256:
+                raise TrackerError("finalize 重放的目标文件不存在或哈希冲突")
+        except OSError as error:
+            raise TrackerError(f"finalize 重放的目标文件无法读取：{target}") from error
+        return existing
+
+    final_version = len(final_history) + 1
+    expected_final_name = (
+        f"{base_name}_v{final_version:02d}.png"
+    )
+    if target.name != expected_final_name:
+        raise TrackerError(f"最终版本必须连续递增，本次应为：{expected_final_name}")
+    try:
+        manifest_before = manifest.read_bytes() if manifest.exists() else None
+    except OSError as error:
+        raise TrackerError(f"清单无法读取：{manifest}") from error
+
+    target_created = False
+    if target.exists():
+        try:
+            if not target.is_file() or _sha256(target) != target_sha256:
+                raise TrackerError(f"发现异哈希 final 目标孤儿，拒绝覆盖：{target}")
+        except OSError as error:
+            raise TrackerError(f"final 目标孤儿无法读取：{target}") from error
+    else:
+        try:
+            _write_exclusive(target, final_bytes)
+            target_created = True
+        except FileExistsError as error:
+            raise TrackerError(f"最终图目标已存在，拒绝覆盖：{target}") from error
+        except OSError as error:
+            raise TrackerError(f"无法生成最终图：{target}") from error
+
     try:
         if _sha256(source) != source_hash_before:
             raise TrackerError("来源图片在复制期间发生变化，已撤销最终图")
-        width, height = _image_size(target)
-        record = {
-            "schema_version": ARTIFACT_SCHEMA_VERSION,
-            "artifact_id": str(uuid.uuid4()),
-            "task_id": source_record.get("task_id"),
-            "provider": source_record.get("provider"),
-            "platform": source_record.get("platform"),
-            "product_name": source_record.get("product_name"),
-            "image_id": source_record.get("image_id"),
-            "image_type": source_record.get("image_type"),
-            "immutable_identity_sha256": approval_context["immutable_identity_sha256"],
-            "approval_scope_version": approval_context["scope_version"],
-            "approval_scope_sha256": approval_context["scope_sha256"],
-            "session_id": source_record.get("session_id"),
-            "attempt_no": source_record.get("attempt_no"),
-            "direct_index": None,
-            "artifact_kind": "final",
-            "prompt_id": source_record.get("prompt_id"),
-            "prompt_path": source_record.get("prompt_path"),
-            "prompt_sha256": source_record.get("prompt_sha256"),
-            "call_started_at": source_record.get("call_started_at"),
-            "captured_at": datetime.now(timezone.utc).isoformat(),
-            "provenance_mode": "derivation",
-            "source_path": str(source),
-            "source_sha256": source_hash_before,
-            "target_path": str(target),
-            "target_sha256": _sha256(target),
-            "width": width,
-            "height": height,
-            "status": "accepted",
-            "visual_checks": dict(source_record.get("visual_checks") or {}),
-            "inspection_session_id": None,
-            "inspection_checked_at": None,
-            "inspection_notes": None,
-            "rejection_reason": None,
-            "derived_from_artifact_id": source_artifact_id,
-            "snapshot_path": source_record.get("snapshot_path"),
-            "snapshot_sha256": source_record.get("snapshot_sha256"),
-            "supersedes_artifact_id": None,
-            "supersession_reason": None,
-        }
+        if _sha256(target) != target_sha256:
+            raise TrackerError("最终图目标与内存派生结果哈希不一致，已撤销最终图")
+        record = dict(stable_record)
+        record["artifact_id"] = str(uuid.uuid4())
+        record["captured_at"] = datetime.now(timezone.utc).isoformat()
         _append_manifest(manifest_path, record)
     except Exception as error:
-        _restore_manifest(manifest, manifest_existed, manifest_size)
+        rollback_error: Exception | None = None
         try:
-            target.unlink(missing_ok=True)
-        except OSError:
-            pass
+            _restore_manifest(manifest, manifest_before)
+        except Exception as caught:
+            rollback_error = caught
+        if target_created:
+            try:
+                target.unlink(missing_ok=True)
+            except OSError as caught:
+                rollback_error = rollback_error or caught
+        if rollback_error is not None:
+            raise TrackerError("finalize 同步失败且本次目标或清单回滚失败") from rollback_error
         if isinstance(error, OSError):
-            raise TrackerError("生成最终图期间文件发生变化或无法读取，已撤销最终图") from error
+            raise TrackerError("生成最终图期间文件发生变化或无法读取") from error
         raise
     return record
 
@@ -2407,14 +3633,55 @@ def _build_parser() -> argparse.ArgumentParser:
     snapshot = subparsers.add_parser("snapshot", help="写入调用前快照")
     snapshot.add_argument("--source-dir", required=True, help="渠道生成目录")
     snapshot.add_argument("--snapshot-path", required=True, help="新快照的保存路径")
+    reserve = subparsers.add_parser("reserve", help="原子预留一次渠道调用")
+    reserve.add_argument("--job", required=True, help="任务 JSON 路径")
+    reserve.add_argument("--image-id", required=True, help="图号")
+    reserve.add_argument("--attempt-no", required=True, type=int, help="尝试号")
+    reserve.add_argument(
+        "--dispatch-mode", required=True, choices=("parallel", "serial"), help="调用调度模式",
+    )
+    reserve.add_argument(
+        "--artifact-kind", default="direct", choices=("direct", "revision"), help="产物类型",
+    )
+    reserve.add_argument("--direct-index", type=int, choices=(1, 2, 3), help="计划直出序号")
+    reserve.add_argument("--prompt-id", required=True, help="提示词编号")
+    reserve.add_argument("--prompt-path", required=True, help="提示词文件路径")
+    reserve.add_argument("--source-dir", required=True, help="渠道生成目录")
+    reserve.add_argument("--snapshot-path", required=True, help="调用前快照路径")
+    stage = subparsers.add_parser("stage", help="排他暂存一次渠道结果")
+    stage.add_argument("--job", required=True, help="任务 JSON 路径")
+    stage.add_argument("--image-id", required=True, help="图号")
+    stage.add_argument("--attempt-no", required=True, type=int, help="尝试号")
+    stage.add_argument(
+        "--source",
+        required=True,
+        help="渠道明确返回路径；来源模式固定为 tool_return",
+    )
+    fail = subparsers.add_parser("fail", help="原子登记渠道失败或终止不明")
+    fail.add_argument("--job", required=True, help="任务 JSON 路径")
+    fail.add_argument("--image-id", required=True, help="图号")
+    fail.add_argument("--attempt-no", required=True, type=int, help="尝试号")
+    fail.add_argument(
+        "--failure-type", required=True, choices=tuple(sorted(VALID_FAILURE_TYPES)), help="失败分类",
+    )
+    fail.add_argument("--reason", required=True, help="失败原因")
+    fail.add_argument(
+        "--termination-confirmed",
+        action="store_true",
+        help="确认 unresolved 渠道调用已经终止，允许转为确定失败",
+    )
     capture = subparsers.add_parser("capture", help="登记一次直出或修订产物")
     capture.add_argument("--snapshot-path", required=True, help="调用前快照路径")
     capture.add_argument("--source-dir", required=True, help="渠道生成目录")
     capture.add_argument("--source", help="渠道明确返回的来源图片路径")
     capture.add_argument("--destination", required=True, help="产物保存路径")
     capture.add_argument("--manifest", required=True, help="JSONL 清单路径")
-    for flag, help_text in (("task-id", "任务编号"), ("provider", "渠道名称"), ("platform", "平台名称"), ("product-name", "产品名称"), ("image-id", "图号"), ("image-type", "图型"), ("prompt-id", "提示词编号"), ("prompt-path", "提示词文件路径"), ("call-started-at", "渠道调用开始时间")):
+    for flag, help_text in (("task-id", "任务编号"), ("provider", "渠道名称"), ("platform", "平台名称"), ("product-name", "产品名称"), ("image-id", "图号"), ("image-type", "图型"), ("prompt-id", "提示词编号"), ("prompt-path", "提示词文件路径")):
         capture.add_argument(f"--{flag}", required=True, help=help_text)
+    capture.add_argument(
+        "--call-started-at",
+        help="v1 任务必填的渠道调用开始时间；v2 任务省略并使用 attempt 规范时间",
+    )
     capture.add_argument("--attempt-no", required=True, type=int, help="尝试号")
     capture.add_argument("--direct-index", type=int, choices=(1, 2, 3), help="有效直出序号")
     capture.add_argument("--artifact-kind", default="direct", choices=("direct", "revision"), help="产物类型")
@@ -2443,6 +3710,26 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if arguments.command == "snapshot":
             _print_json(write_snapshot(arguments.source_dir, arguments.snapshot_path))
+        elif arguments.command == "reserve":
+            _print_json(reserve_attempt(
+                job_path=arguments.job, image_id=arguments.image_id,
+                attempt_no=arguments.attempt_no, dispatch_mode=arguments.dispatch_mode,
+                artifact_kind=arguments.artifact_kind, direct_index=arguments.direct_index,
+                prompt_id=arguments.prompt_id, prompt_path=arguments.prompt_path,
+                source_dir=arguments.source_dir, snapshot_path=arguments.snapshot_path,
+            ))
+        elif arguments.command == "stage":
+            _print_json(stage_attempt(
+                job_path=arguments.job, image_id=arguments.image_id,
+                attempt_no=arguments.attempt_no, source_path=arguments.source,
+            ))
+        elif arguments.command == "fail":
+            _print_json(fail_attempt(
+                job_path=arguments.job, image_id=arguments.image_id,
+                attempt_no=arguments.attempt_no, failure_type=arguments.failure_type,
+                reason=arguments.reason,
+                termination_confirmed=arguments.termination_confirmed,
+            ))
         elif arguments.command == "capture":
             _print_json(capture_artifact(
                 snapshot_path=arguments.snapshot_path, source_dir=arguments.source_dir,

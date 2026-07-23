@@ -20,7 +20,7 @@
 
 尚无清单产物时，范围变化可以在当前任务内递增 `scope_version` 并重新确认。首条产物出现后，`task_id`、`provider`、`platform`、`product_name` 所代表的产品身份、既有 `image_id` 集合及每图 `image_type` 构成不可变任务身份。增加或删除图号、改变产品身份或改变任一图号的图型时，立即阻塞当前任务；必须建立新 task，并使用独立的新输出根目录和清单，不能在原任务内通过 replacement 恢复。
 
-产物工具对上述字段及按 `(image_id, image_type)` 排序的完整图片身份集合计算规范 JSON SHA256，并把结果作为 schema v5 清单每行必填的 `immutable_identity_sha256`。首条产物完成机械绑定；后续 `capture`、`finalize`、`verify` 必须把当前 job 计算值与全部历史任务记录逐行比较，不能只依赖当前 job 声明或当前图号。任一值不一致时不得在原任务继续。
+产物工具对上述字段及按 `(image_id, image_type)` 排序的完整图片身份集合计算规范 JSON SHA256，并把结果作为清单每行必填的 `immutable_identity_sha256`。job v1 对应清单 v5，job v2 对应清单 v6；首条产物完成机械绑定，后续 `capture/finalize/verify` 必须与同 task 的全部历史记录逐行比较。
 
 不改变上述身份的文案、卖点、颜色依据、尺寸、人物、`output_type_original`、参考图角色等属于可变范围；同一产品身份内已批准的颜色或 SKU 表现变化也属于可变范围。这类变化必须把确认重置为 `pending`，停止分派并重新确认。若已经存在 accepted direct，重新批准后旧范围产物立即失效；三个旧 direct 必须分别用更大的 `attempt_no` 追加当前范围 replacement，沿用各自 `direct_index`，填写 `supersedes_artifact_id` 和原因。三个当前范围 replacement 齐全前不得生成新 final；旧 revision/final 随旧血缘失效。
 
@@ -30,13 +30,20 @@
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "task_id": "temu-us-20260721-001",
   "provider": "imagegen",
   "platform": "TEMU_US",
   "product_name": "产品稳定名称",
   "product_folder": "C:/absolute/product-folder",
   "main_session_id": "session-main-001",
+  "concurrency_policy": {
+    "scope": "cross_image_only",
+    "max_calling_attempts": 3,
+    "max_pending_attempts": 3,
+    "parallel_provenance": "tool_return_only",
+    "serial_fallback": "retry_after_drain"
+  },
   "job_status": "awaiting_approval",
   "approval": {
     "status": "pending",
@@ -195,7 +202,6 @@
       },
       "execution": {
         "status": "planned",
-        "next_attempt_no": 1,
         "accepted_direct_indexes": [],
         "selected_artifact_id": null,
         "final_artifact_ids": [],
@@ -210,6 +216,8 @@
 
 `approval.scope_sha256` 对下列对象使用 UTF-8、键排序、紧凑分隔符的规范 JSON 计算 SHA256：任务级 `provider`、`platform`、`product_name`、`product_folder`、`main_session_id`、`material_inventory`、`evidence_sources`、产品/面料/视觉基准；每条参考的 `reference_id`、`evidence_id`、`path`、`role`、`applies_to`、`source_location`；每图的 `image_id`、`image_type`、`output_type_original`、目标、原文/修正、卖点、颜色证据、允许产品变化、人物/场景依据、`reference_ids` 和稳定 `target_paths`。批准时把同一值写入 `approved_scope_sha256`；范围变化时递增 `scope_version`、重算哈希、清空批准哈希并改回 `pending`。
 
+`concurrency_policy` 是不可由用户确认放宽的固定执行策略，不进入审批哈希。job v2 必须逐键、逐值等于示例；资源不足只降低实际并发，不修改策略。job v1 没有此对象并保持旧串行语义；同一 task 不得混用 v1/v5 与 v2/v6。
+
 `target_paths` 只保存稳定的 direct 目录、final 目录和 `final_stem`，不保存会从 `_v01` 递增到 `_v02` 的具体 final 文件名。`prompt_paths`、参考图的 intake `view_image` 状态、检查 Session、`session`、`execution` 和实际 final 产物编号都是运行状态，不进入审批哈希；它们的变化不能伪装成业务范围变化，也不能掩盖真实范围变化。
 
 `material_inventory.required` 固定包含需求表、真实尺寸、清晰产品实拍和输出类型，状态都必须为 `ready`；前三项引用已登记证据，输出类型的 `image_ids` 必须完整覆盖全部图号。`material_inventory.conditional` 固定盘点 VI、logo、面料/颜色、细节、版式/场景、禁用信息、WPS `DISPIMG` 和其他素材；状态只用 `available` 或 `not_available`，前者必须有证据，后者不得伪挂证据。所有 `evidence_sources` 必须进入某个必需或条件性类别，不能留下未归类证据。
@@ -218,13 +226,20 @@
 
 `image_type` 是规范化后的 `主图` 或 `副图`，用于命名和清单；`output_type_original` 原样保存需求表中的详情、SKU、颜色图等称呼。`copy_original` 永远保存需求表原文；修正只写入 `copy_corrections`，每项包含 `from`、`to` 和 `reason`。
 
-`execution.attempts` 是不可删除、不可覆盖且按 `attempt_no` 严格递增的调用历史。发起渠道调用前先追加状态为 `calling` 的当前尝试，至少写入：`attempt_no`、`approval_scope_version`、`approval_scope_sha256`、`session_id`、`input_reference_ids`、本 Session 的 `view_events`、`prompt_id`、提示词路径/哈希、快照路径/哈希和 `call_started_at`。`prompt_id` 必须是去空白后非空的字符串，`call_started_at` 不得早于快照创建时间或晚于 capture 固定的本次 UTC 捕获时间。调用归档后在该对象中写入渠道返回路径、结果 `artifact_id`、产物类型、直出序号、最终状态、拒绝/失败原因、来源模式、来源/目标路径与哈希、尺寸，以及检查 Subagent 编号、检查时间和检查结论；无产物的超时也必须改为 `failed` 并保留。`last_error` 只作为最新摘要。
+`execution.attempts` 是不可删除、不可覆盖且按 `attempt_no` 严格递增的调用历史。运行状态只能由以下原子命令改变：
 
-`execution.final_inspections` 保存 final 的独立终检记录。每条固定包含 `artifact_id`、`inspection_session_id`、`checked_at`、非空 `notes` 和七项严格布尔 `visual_checks`。当前合法 final 必须且只能对应一条记录；检查 Session 不得等于该 final 来源的生成 `session_id`，检查时间不得早于 final 生成时间，七项必须全部为 `true`。`verify` 会把缺失、重复、自检、失败或无法与唯一 final 对账的记录判为错误。
+- `reserve`：显式接收主 Session 提供的 `attempt_no`，校验严格递增、并发上限和同图未终结状态；在脚本内部生成一次 `call_started_at`，并写入 `dispatch_mode`、`artifact_kind`、`direct_index`、审批范围、Session/引用查看记录、`prompt_id` 与提示词路径/哈希、`source_dir`、快照路径/哈希和 `status: calling`。CLI 和公共 API 都不接受外部调用时间。
+- `stage`：只处理当前 calling/unresolved attempt，且必须接收渠道明确 `source_path`；复制前用 attempt 专属 identity sidecar 固化来源路径和哈希，中断恢复时严格对账，成功写回 job 后清理；随后写入 `provenance_mode: tool_return`、`provider_source_path/provider_source_sha256`、`staged_path/staged_sha256`、尺寸、`staged_at` 和 `status: staged`。
+- `fail`：按 [provider-contract.md](provider-contract.md) 的固定枚举写入 `failure_type`、`failure_reason`、`failure_recorded_at` 和 `termination_confirmed`；确定失败进入 `failed`，终止不明的 `timeout/interrupted` 进入 `unresolved`。
+- `capture`：只消费 staged attempt；写入产物、检查和血缘字段，并原子终结为 `accepted` 或 `rejected`。job v2 从该 attempt 派生规范 `call_started_at`，调用方必须省略外部调用时间；job v1/v5 兼容路径仍要求显式提供。
 
-历史 attempt 按自身 `approval_scope_version`/`approval_scope_sha256` 校验：其历史 `session_id`、`input_reference_ids` 和 `view_events` 必须互相一致，提示词/快照仍严格按路径和哈希验证；accepted/rejected 还必须与其 `artifact_id` 唯一绑定的清单行在审批范围和全部 provenance 字段上一致。只有当前 `calling`，以及绑定当前审批范围产物的 accepted/rejected attempt，必须等于当前 Session、`reference_ids` 和完整 `view_events`。重新批准后不得改写或删除旧 attempts 来迎合当前引用状态。
+`accepted/rejected/failed` 是终态；`calling/staged/unresolved` 是未终结状态。全任务最多三个 calling，且 `calling + staged + unresolved` 最多三个；同图最多一个未终结 attempt。serial 必须全局独占。不得手工改写这些状态或通过删除、租约过期、重编号释放槽位。
 
-同一图号只能有一个 `calling` 尝试。产物工具只允许捕获这个当前调用，或在尚未写入当前对象时使用大于全部历史尝试号的新值；已经 `failed`、`rejected` 或完成的尝试号不得复用。`capture` 返回后必须立即归档该尝试；仍有 `calling` 时，`finalize` 和 `verify` 必须失败。
+`execution.final_inspections` 保存 final 的独立终检记录。每条固定包含 `artifact_id`、`inspection_session_id`、`checked_at`、非空 `notes` 和七项严格布尔 `visual_checks`。v6 final 清单本身固定写 `visual_checks: null`，不得复制父级 direct/revision 的候选检查；job v1/v5 保留旧清单兼容语义。当前合法 final 必须且只能对应一条记录；检查 Session 必须同时不同于该 final 来源的生成 `session_id` 和顶层 `main_session_id`，检查时间不得早于 final 生成时间，七项必须全部为 `true`。`verify` 会把缺失、重复、自检、主 Session 代检、失败或无法与唯一 final 对账的记录判为错误。
+
+历史 attempt 按自身 `approval_scope_version`/`approval_scope_sha256` 校验：其历史 `session_id`、`input_reference_ids` 和 `view_events` 必须互相一致，提示词/快照仍严格按路径和哈希验证；accepted/rejected 还必须与其 `artifact_id` 唯一绑定的清单行在审批范围和全部 provenance 字段上一致。当前未终结 attempt 以及绑定当前审批范围产物的 accepted/rejected attempt，必须等于当前 Session、`reference_ids` 和完整 `view_events`。重新批准后不得改写或删除旧 attempts 来迎合当前引用状态。
+
+同图未终结 attempt 归档前，不得分派下一版。`finalize` 只要求当前图号没有 calling/staged/unresolved，其他图号可继续生成或待检；`verify` 和任务 `complete` 要求全任务没有未终结 attempt。
 
 产物工具从清单位置自动定位本任务 JSON，重新计算审批哈希，并校验 `approval.status`、批准哈希、用户确认原文、图型、独立 `session_id` 以及本 Session 对全部 `reference_ids` 的 `view_events`。校验失败时，`capture`、`finalize` 和 `verify` 都不得给出可交付结果。
 
@@ -245,9 +260,9 @@
 - 三个提示词文件路径、目标 direct/final 路径、当前 `attempt_no` 和缺失的 `direct_index`。
 - 渠道适配器路径和产物清单路径。
 
-不得传递上一图的临时对话、图片编号、人物、场景、文案或未被本图引用的参考图。生成子 Session 结束时只回写最终提示词、参考角色、渠道结果和候选路径，不得给自己的候选填写验收结论。
+最多同时运行三个不同图号的生成子 Session；同图的三个版本始终由同一生成 Session 串行完成。不得传递上一图的临时对话、图片编号、人物、场景、文案或未被本图引用的参考图。生成子 Session 只结构化返回最终提示词、查看事件、渠道结果、候选路径或缺失原因，不得验收产物，也不得写 job、JSONL 或产物文件。
 
-素材图片、每个 `direct/revision` 候选和每个 final 都必须交给检查 Subagent。产物检查 Subagent 必须同时不同于对应生成 Session 和顶层 `main_session_id`，逐张执行 `view_image` 后返回检查身份、时间、非空结论和七项检查；final 还要绑定 `artifact_id`。主 Session 只负责分派、接收结构化检查结果、执行 `capture/finalize/verify` 和汇总，不得自行补填检查结果。环境不能建立生成子 Session 或检查 Subagent 时立即阻塞。
+素材图片、每个 staged `direct/revision` 候选和每个 final 都必须交给检查 Subagent。产物检查 Subagent 必须同时不同于对应生成 Session 和顶层 `main_session_id`，逐张执行 `view_image` 后只返回检查身份、时间、非空结论和七项检查；final 还要绑定 `artifact_id`。检查者不得写 job、清单或提交状态。主 Session 串行执行状态命令；final 检查仍由主 Session 把检查者返回的 `final_inspections` 原样写入 job，不得代检或修改结论。
 
 ## 5. 图片角色和查看记录
 

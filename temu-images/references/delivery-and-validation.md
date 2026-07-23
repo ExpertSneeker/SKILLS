@@ -1,5 +1,15 @@
 # 交付、恢复与验收
 
+## 目录
+
+1. [允许的本地处理](#1-允许的本地处理)
+2. [命名与路径](#2-命名与路径)
+3. [尝试号与直出序号](#3-尝试号与直出序号)
+4. [产物工具用法](#4-产物工具用法)
+5. [中断恢复](#5-中断恢复)
+6. [业务验收](#6-业务验收)
+7. [完成条件](#7-完成条件)
+
 ## 1. 允许的本地处理
 
 本地工具只允许复制、格式转换、尺寸调整、哈希计算和文件保存，不得改变画面内容。最终尺寸调整由 `artifact_tracker.py finalize` 执行。任何重绘、抠改产品、合成新内容、本地排版或文字覆盖都不属于技术处理，必须回到生图渠道。
@@ -18,7 +28,7 @@
 
 ## 3. 尝试号与直出序号
 
-`attempt_no` 每次渠道调用递增，包括超时和作废调用。`direct_index` 只在直出通过全部检查后分配，按当前缺失项填 1、2、3。作废版本、渠道内 `revision` 和 `final` 的 `direct_index` 必须为空。
+每个图号的 `attempt_no` 随每次渠道调用严格递增，包括超时和作废调用；不同图号各自从 1 开始。`direct_index` 只在直出通过全部检查后分配，按当前缺失项填 1、2、3。作废版本、渠道内 `revision` 和 `final` 的 `direct_index` 必须为空。
 
 每个图号完成三版的条件是：恰好拥有 `direct01`、`direct02`、`direct03` 三条有效记录；三张目标图片 SHA256 两两不同；三个提示词 SHA256 两两不同；三张均为正方形；每张都由非生成者的检查 Subagent 执行 `view_image`，且七项视觉检查全部通过。调用三次或生成者自检不等于完成三版。
 
@@ -31,29 +41,41 @@
 ```powershell
 python <skill目录>/scripts/artifact_tracker.py --help
 python <skill目录>/scripts/artifact_tracker.py snapshot --source-dir <渠道生成目录> --snapshot-path <唯一快照.json>
+python <skill目录>/scripts/artifact_tracker.py reserve --job <_temu_job.json> --image-id <图号> --attempt-no <尝试号> --dispatch-mode <parallel|serial> --artifact-kind <direct|revision> [--direct-index <1|2|3>] --prompt-id <编号> --prompt-path <提示词.txt> --source-dir <渠道生成目录> --snapshot-path <快照.json>
+python <skill目录>/scripts/artifact_tracker.py stage --job <_temu_job.json> --image-id <图号> --attempt-no <尝试号> --source <渠道明确路径>
+python <skill目录>/scripts/artifact_tracker.py fail --job <_temu_job.json> --image-id <图号> --attempt-no <尝试号> --failure-type <类型> --reason <具体原因> [--termination-confirmed]
 python <skill目录>/scripts/artifact_tracker.py capture <按帮助提供全部字段>
 python <skill目录>/scripts/artifact_tracker.py finalize --manifest <清单.jsonl> --source-artifact-id <产物编号> --destination <最终.png>
 python <skill目录>/scripts/artifact_tracker.py verify --manifest <清单.jsonl>
 ```
 
-`capture` 对目标文件使用排他创建，绑定一次性快照，验证复制前后来源哈希，并在清单追加失败时撤销孤立目标。每次必须传 `--inspection-session-id`、`--inspection-checked-at` 和 `--inspection-notes`，检查 Session 不得等于生成 Session。`revision` 必须提供 `--parent-artifact-id`；replacement direct 必须提供 `--supersedes-artifact-id` 和 `--supersession-reason`。`finalize` 只在三个当前有效 direct 齐全后接受已通过的正方形 `direct/revision`，固定输出 `1000x1000` PNG。不要绕过脚本手工写清单或覆盖文件。
+`reserve` 只接受严格递增且由主 Session 显式提供的 `attempt_no`，原子校验固定并发策略、同图未终结 attempt、calling 上限和 pending 上限；`call_started_at` 只由脚本生成。最新 attempt 为 `completed_without_path` 时，下一次 `reserve` 强制使用全局排空后的 serial，parallel 会失败。job v2 的 `stage --source` 必填，parallel 与 serial 都只接受渠道明确路径，禁止用唯一快照差异认领共享目录图片。暂存目标固定为 `output/temp/<task-id>/<image-id>/staged/<attempt-no>.png`；复制前临时写入同目录 `<attempt-no>.identity.json`，中断收养必须同时匹配 attempt、规范来源路径、来源哈希和 staged 哈希，无身份日志的孤儿失败关闭。job v1/清单 v5 的旧 `capture snapshot_diff` 仅用于兼容原任务。
 
-`capture`、`finalize` 和 `verify` 会从清单位置自动定位 `output/temp/<task-id>/_temu_job.json`，重新计算审批范围哈希，并核对当前确认与独立 Session 查看记录；不需要额外传任务 JSON 参数。`approval.status` 不是 `approved`、哈希变化、确认原文缺失、Session 未分派或输入未在本 Session 查看时，工具必须失败。
+`fail` 使用 [provider-contract.md](provider-contract.md) 的固定 `failure_type` 和 `--reason`。终止不明的 `timeout/interrupted` 进入 `unresolved`；已确认终止时传 `--termination-confirmed`，从 calling 或 unresolved 进入 `failed`。不要把 unresolved 改回 pending、删除 attempt 或用租约过期释放槽位。
+
+job v2 的 `capture` 只读取 staged 副本，调用方不得传 `--source` 或 `--call-started-at`；脚本从 attempt 读取 `reserve` 生成的规范调用时间，传入任何外部值都会阻塞。每次仍必须传 `--inspection-session-id`、`--inspection-checked-at` 和 `--inspection-notes`；检查 Session 不得等于生成或主 Session，检查时间不得早于 `staged_at`。`revision` 必须提供 `--parent-artifact-id`；replacement direct 必须提供 `--supersedes-artifact-id` 和 `--supersession-reason`。job v1/v5 继续使用原来的串行来源行为，并要求显式传 `--call-started-at`。
+
+`stage/capture/finalize` 对目标使用排他创建，并在关闭前 `flush + fsync` 文件内容。同 attempt、同身份和同哈希的中断孤儿可由重跑命令收养；任一身份或哈希不同立即阻塞，禁止覆盖。`capture` 串行提交目标、清单 v6 和 attempt 终态；同步失败恢复进入命令前的完整清单字节，并只删除本次新建目标。`finalize` 使用相同的孤儿收养、幂等重放和精确回滚规则，只在当前图号排空且三个当前有效 direct 齐全后接受通过验收的正方形 `direct/revision`，固定输出 `1000x1000` PNG。v6 final 清单固定写 `visual_checks: null`，终检结果只写入 job；v5 final 保留旧兼容字段。
+
+状态命令使用持久 `.lock` 文件上的操作系统句柄锁，锁顺序固定为 `manifest -> job`。进程退出会释放锁；锁文件本身可以保留，不代表任务仍被占用，也不得靠删除锁文件抢占写入。
+
+`capture`、`finalize` 和 `verify` 会从清单位置定位对应 job，重算审批哈希并核对当前确认与 Session 查看记录。`finalize` 只因当前图号存在 calling/staged/unresolved 而阻塞，其他图号可继续；`verify` 和任务 complete 要求全任务没有未终结 attempt。不要手工写清单、attempt 或 staged 元数据。
 
 ## 5. 中断恢复
 
 恢复任务时按以下顺序进行：
 
-1. 读取 `_temu_job.json`、清单和现有提示词，不依赖聊天记忆判断完成度。
-2. 运行 `verify`；同时核对任务 JSON 中每图的 `attempt_no`、产物编号和状态。
-3. 当前有效 direct 文件缺失、哈希变化、视觉误判或审批范围已变化时视为后验失效，保留证据并生成带 supersession 关系的 replacement；不能重写旧清单哈希来掩盖。失效 direct 的 revision/final 血缘不再计入完成度。
-4. 从缺失或失效的图号和 `direct_index` 继续；新调用使用严格递增的 `attempt_no`、新提示词文件和新快照文件。
-5. 超时、工具中断或未稳定进入下一次调用的尝试不得标记完成。没有唯一来源时重新调用。
-6. 三版齐全后才允许渠道内 revision、选版和派生 final。final 必须由非生成者的检查 Subagent 独立终检并写入 `execution.final_inspections`，再运行 `verify`。具体 final 文件名按未占用的 `_vNN` 递增，任务审批只绑定稳定的 final 目录和文件名前缀，不因技术版本号递增而失效。
+1. 读取 `_temu_job.json`、清单、staged 文件和提示词，不依赖聊天记忆；不得删除或重编号历史 attempt。
+2. 逐图核对未终结状态：0 个可正常继续；1 至 3 个不同图号 calling 逐项等待；staged 继续独立检查/capture；非法上限、同图多个或 serial 混存立即阻塞。
+3. `completed_without_path` 只有在全任务 calling/staged/unresolved 全部为 0 后，才可用新 attempt、新提示词/快照执行全局独占 serial 重试；重试仍须返回明确路径。
+4. `timeout/interrupted` 且无法确认终止时保持 unresolved；迟到明确路径只归原 attempt 并可 `stage`。没有路径则继续阻塞，不重派同图；确认调用已终止后使用同一 attempt 和 `--termination-confirmed` 转为 failed。
+5. 当前有效 direct 缺失、哈希变化、视觉误判或审批范围变化时，保留证据并生成带 supersession 的 replacement；不能重写旧清单哈希。失效 direct 的 revision/final 血缘不再计入完成度。
+6. 从缺失或失效的 `direct_index` 继续；每次新调用使用严格递增 attempt、新提示词和新快照。同图仍由原生成 Subagent 串行完成。
+7. 三版齐全后才允许 revision、选版和 final。final 由独立检查 Subagent 终检；主 Session 把返回的 `final_inspections` 原样写入 job，再运行 `verify`。final 文件名按未占用的 `_vNN` 递增。
 
 ## 6. 业务验收
 
-finalize 完成后，主 Session 必须把每张 final 分派给不同于生成 Session 的检查 Subagent。检查 Subagent 逐图执行最终 `view_image`，并对照任务 JSON、素材基准和设计合规文件检查：
+finalize 完成后，主 Session 必须把每张 final 分派给同时不同于对应生成 Session 和 `main_session_id` 的检查 Subagent。检查 Subagent 逐图执行最终 `view_image`，并对照任务 JSON、素材基准和设计合规文件检查：
 
 - 图号、输出类型、逐图目标、卖点和需求表英文原文一致。
 - 尺寸文案优先使用美国市场常用的 `inch`；需求表已有明确单位时按原要求执行，整套单位表达必须自然、统一且换算可追溯。

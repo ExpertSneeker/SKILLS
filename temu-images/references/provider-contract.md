@@ -1,88 +1,116 @@
 # 生图渠道适配器协议
 
+## 目录
+
+1. [适配器存在性](#1-适配器存在性)
+2. [适配器能力声明](#2-适配器能力声明)
+3. [并发与写入边界](#3-并发与写入边界)
+4. [调用与暂存生命周期](#4-调用与暂存生命周期)
+5. [来源模式](#5-来源模式)
+6. [产物、清单与检查](#6-产物清单与检查)
+7. [失败与交接](#7-失败与交接)
+
 ## 1. 适配器存在性
 
-`provider` 的值必须对应 `references/provider-<provider>.md`。适配器必须在调用前完整读取；文件不存在、工具不可用或能力无法满足本协议时立即阻塞，禁止临时猜测参数、返回路径、编辑能力或失败语义。
+`provider` 必须对应 `references/provider-<provider>.md`。调用前完整读取适配器；文件不存在、工具不可用或能力不满足本协议时立即阻塞，禁止临时猜测参数、返回路径、编辑能力或失败语义。
 
-未来新增渠道只新增一个适配器文件并通过本协议的评估场景，不复制或改写 TEMU 业务规则。适配器只描述渠道差异。
+未来新增渠道只增加一个适配器并通过本协议的评估场景，不复制 TEMU 业务规则。适配器只描述渠道差异。
 
-## 2. 适配器必须声明的能力
+## 2. 适配器能力声明
 
 每个适配器必须明确：
 
-- 渠道名、所需 Skill/工具及运行时读取要求。
-- 支持的新生成、带参考生成和渠道内编辑能力。
-- 输入图片传递方法、角色表达方法、输入数量或格式限制。
-- 调用是否必须串行，以及如何隔离一个图号的上下文。
-- 如何把候选路径交给独立检查 Subagent，并保证检查 Session 不等于生成 Session。
-- 成功时是否返回明确源路径；无路径时是否允许唯一快照差异兜底。
-- 渠道生成目录、任务 direct/temp/final 目录和清单路径。
-- 超时、失败、多候选、不可读输出和内容污染的处理。
-- 英文文字错误能够使用的渠道内重生或编辑方式。
-- 产物交回主 Session 时需要的字段。
+- 渠道名、所需 Skill/工具和运行时读取要求。
+- 新生成、带参考生成和渠道内编辑能力。
+- 输入图片传递、角色表达、数量与格式限制。
+- 是否支持不同图号并发；若不支持，实际并发降为 1，不修改 job 固定策略。
+- 如何隔离图号上下文，并保证同图三版由同一生成 Subagent 串行完成。
+- 成功时如何返回当前调用的唯一绝对源路径；不能稳定返回明确路径的渠道不满足 job v2 协议。
+- 渠道源目录、direct/temp/final 目录和清单路径。
+- 超时、中断、多候选、不可读输出、内容污染和英文错误的处理。
+- 生成 Subagent 向主 Session 返回的结构化字段。
 
-为使新增渠道不修改脚本，适配器路径必须落在产品文件夹的共同骨架：清单位于 `output/<渠道直出目录>`，有效 direct 与清单同目录，rejected 位于 `output/temp/rejected-<provider>`，revision 位于 `output/temp/<task-id>/<image-id>`，final 位于 `output/final`。适配器只决定渠道直出目录名、清单名和渠道全局源目录。
+所有渠道使用共同路径骨架：清单位于 `output/<渠道直出目录>`，有效 direct 与清单同目录，rejected 位于 `output/temp/rejected-<provider>`，revision 位于 `output/temp/<task-id>/<image-id>`，final 位于 `output/final`。
 
-## 3. 调用生命周期
+## 3. 并发与写入边界
 
-每次调用必须按这个顺序完成：
+- 全任务最多三个 `calling`，且必须属于不同 `image_id`。
+- 全任务 `calling + staged + unresolved` 最多三个；同图存在任一未终结 attempt 时禁止新调用。
+- 同图三个版本固定由同一生成 Subagent 串行调用；不得把 V1/V2/V3 分给不同代理抢占三个槽。
+- `serial` attempt 必须全任务独占；存在其他未终结 attempt 时不得建立。
+- 生成 Subagent 只查看本图输入、调用渠道并返回结果；检查 Subagent 只执行 `view_image` 和七项检查。两者都不得写 job、JSONL 或产物文件。
+- 只有主 Session 串行运行 `reserve/stage/fail/capture/finalize/verify`。`reserve/stage/fail/capture` 原子更新 attempt、staged 元数据或清单状态，不得手工补写这些字段。
 
-1. 确认任务已获批、当前图号拥有独立子 Session、渠道适配器已读取。
-2. 重新核对本图输入角色，并逐张完成适配器要求的可视检查。
-3. 保存不可覆盖、非空且可按 UTF-8 读取的 `.txt` 提示词文件；`attempt_no` 对本图每次调用严格递增，包括无产物超时。
-4. 按适配器建立本次调用专用且不可复用的快照，先记录快照路径/哈希和 UTC 调用开始时间，在任务 JSON 追加状态为 `calling` 的当前尝试，再发起唯一一次渠道调用；上一次调用未归档前不得开始下一次。
-5. 优先接收渠道明确返回的源路径；没有明确路径时只执行适配器允许的来源兜底。
-6. 将候选交给同时不同于生成 Session 和 `_temu_job.json.main_session_id` 的检查 Subagent；检查 Subagent 逐张执行 `view_image`，返回身份、时间、非空结论和全部视觉检查。生成 Subagent 与主 Session 均不得代检。
-7. 用 `artifact_tracker.py capture` 传入独立检查字段，排他保存并追加清单。只有已通过独立检查的正方形 `direct` 才分配 `direct_index`。
-8. 把产物编号、来源模式、状态、拒绝原因和下一步写回 `_temu_job.json`。
+环境资源不足时只降低实际并发数。负责人要求赶进度、允许同图并发、允许自检或允许子代理加锁写 JSON，都不能放宽上述边界。
 
-## 4. 来源模式
+## 4. 调用与暂存生命周期
 
-清单只允许三种 `provenance_mode`：
+每次渠道调用按以下顺序执行：
 
-- `tool_return`：渠道明确返回本次调用的一张可读源图片路径，优先使用。
-- `snapshot_diff`：渠道未返回路径，调用前后图片状态差异恰好只有一个候选。
-- `derivation`：`final` 从清单中已通过验收的 `direct` 或 `revision` 派生。
+1. 主 Session 确认任务已获批、图号有独立生成 Session，并保存新的提示词和专用快照。快照只用于调用审计，不用于 job v2 来源认领。
+2. 主 Session 用 `reserve` 显式登记 `attempt_no`、`dispatch_mode`、产物目标、提示词、快照和渠道源目录。命令成功后才占用调用槽并允许分派。
+3. 生成 Subagent 发起一次渠道调用，只返回 `image_id`、`attempt_no`、调用结果、明确源路径或缺失原因和提示词信息，不写任务文件。`call_started_at` 只由 `reserve` 生成，Subagent 返回值不得覆盖。
+4. 主 Session 收到明确路径后立即运行 `stage --source`。脚本先排他写入 attempt 专属 `staged/<attempt-no>.identity.json` 来源身份，再把来源排他复制到 `staged/<attempt-no>.png`；复制前后原来源哈希和 staged 哈希必须一致。job 成功写回后清理身份 sidecar；中断恢复必须同时匹配同一 attempt、规范来源路径、来源哈希和 staged 哈希，无可验证 sidecar 的孤儿一律拒绝。
+5. 检查 Subagent 只读取 staged 副本，逐张执行 `view_image`，返回身份、时间、非空结论、七项布尔检查和拒绝原因。
+6. 主 Session 用 `capture` 消费 staged attempt，排他保存产物、追加清单并把 attempt 原子更新为 `accepted` 或 `rejected`。
+7. 无产物或渠道错误由主 Session 用 `fail` 记录；不得删除、覆盖或重编号历史 attempt。
 
-零候选、多候选、路径不存在、图片不可读或调用归属不明都不能通过视觉相似、文件名、最新时间、最大文件或时间窗口补判。
+attempt 合法流转为：
 
-## 5. 产物类型与状态
+```text
+calling -> staged -> accepted | rejected
+calling -> failed
+calling -> unresolved -> staged -> accepted | rejected
+                      -> failed
+staged  -> failed
+```
 
-- `direct`：渠道一次完整 PNG 直出。通过验收时才能占 `direct01`、`direct02` 或 `direct03`。
-- `revision`：三个当前审批范围的有效 direct 齐全后，渠道内编辑产生的版本。必须指向同一任务、渠道、产品、图型、图号和审批范围下的合法父级；父级可以是已通过验收的 `direct/revision`，也可以是仅 `text_correct=false`、其余视觉检查均通过且文件完整的正方形 PNG `rejected direct/revision`。不占三版直出。
-- `final`：只做格式/尺寸派生的最终 PNG，来源必须是已通过验收的 `direct` 或 `revision`。
+`accepted/rejected/failed` 是终态。`timeout/interrupted` 且无法确认渠道已终止时必须进入 `unresolved`，继续占用同图和 pending 槽；只有渠道迟到的明确路径能由 `stage` 把原 attempt 转为 `staged`，否则保持阻塞。
 
-状态只允许 `accepted` 或 `rejected`。`accepted direct/revision` 的 `rejection_reason` 必须为 `null`；`rejected` 必须有去空白后非空的具体原因且 `direct_index` 为 `null`。两种状态的 `visual_checks` 都必须包含七个必需键且所有值为严格布尔值；accepted 七项全为 `true`，rejected 至少一项为 `false`。超时且没有可归属文件时在任务 JSON 记录失败，不伪造清单产物。
+## 5. 来源模式
 
-## 6. 清单字段
+job v2/清单 v6 只允许：
 
-每行 JSONL 使用 `schema_version: 5`，固定包含：
+- `tool_return`：direct/revision 的渠道调用明确返回当前 attempt 的唯一绝对源路径。
+- `derivation`：final 从已通过验收的 direct/revision 派生。
 
-- 身份：`schema_version`、`artifact_id`、`task_id`、`provider`、`platform`、`product_name`、`image_id`、`image_type`、`immutable_identity_sha256`、`approval_scope_version`、`approval_scope_sha256`。
-- 调用：`session_id`、`attempt_no`、`direct_index`、`artifact_kind`、`prompt_id`、`prompt_path`、`prompt_sha256`、`call_started_at`、`captured_at`、`snapshot_path`、`snapshot_sha256`。
-- 来源与目标：`provenance_mode`、`source_path`、`source_sha256`、`target_path`、`target_sha256`、`width`、`height`。
-- 验收与血缘：`status`、`visual_checks`、`inspection_session_id`、`inspection_checked_at`、`inspection_notes`、`rejection_reason`、`derived_from_artifact_id`、`supersedes_artifact_id`、`supersession_reason`。
+parallel 与 serial 都必须提供明确路径。即使快照后只有一个新增文件，也不能证明共享目录中的图片属于当前调用；job v2 禁止 `snapshot_diff`。job v1/清单 v5 的既有串行 `snapshot_diff` 只为旧任务兼容保留，不得迁移到新 task。
 
-`visual_checks` 对通过验收的 `direct` 和 `revision` 必须把以下键全部设为 `true`：
+调用完成但没有明确路径时，以 `completed_without_path` 终结。脚本强制其下一 attempt 只能在全任务排空后用新提示词、新快照执行全局独占的 serial 重试；parallel reserve 必须失败。重试仍须返回明确路径。原渠道来源的规范绝对路径和 SHA256 都必须全任务唯一；越界路径、不可读图片或归属不明都不能按文件名、最新时间、大小、时间窗口、唯一快照差异或视觉相似度补判。
 
-- `current_product`：当前任务产品和 SKU。
-- `english_only`：无中文、乱码或其他错误语言。
-- `no_pollution`：无其他图号、Session、产品、品牌或平台内容。
-- `product_preserved`：结构、面料、纹理和比例符合垫图；颜色符合垫图或本图已批准的 `allowed_product_changes`，不存在其他变化。
-- `scale_correct`：尺寸与场景参照真实。
-- `text_correct`：英文文案准确、完整、可读。
-- `platform_compliant`：符合需求表和 TEMU 美国站合规规则。
+## 6. 产物、清单与检查
 
-提示词、快照、来源和目标均记录绝对路径与 SHA256。`prompt_id` 必须是去空白后非空的字符串。`capture` 在读取来源和复制之前解析 `call_started_at` 并固定一次 UTC `captured_at`，必须满足快照创建时间 ≤ `call_started_at` ≤ `captured_at`，清单使用同一个已固定的 `captured_at`。同一快照只能登记一次；`tool_return` 也不能省略快照。清单只能由产物工具追加，不能人工删改以制造通过结果。
+- `direct`：一次完整 PNG 直出；通过独立检查后才占 `direct01` 至 `direct03`。
+- `revision`：三个当前有效 direct 齐全后，由渠道内编辑产生；按既有父级和文字专用修订规则登记，不占三版。
+- `final`：只做格式/尺寸派生，来源必须是通过验收的 direct/revision。
 
-`direct/revision` 的三个检查字段必须来自实际执行 `view_image` 的独立检查 Subagent；`inspection_session_id` 不得等于生成 `session_id` 或顶层 `main_session_id`，检查时间必须位于调用开始与捕获之间，结论不得为空。`final` 清单行的三个字段固定为 `null`，其独立终检写入 `_temu_job.json.execution.final_inspections` 并由 `verify` 对账；不得把来源 direct 的检查结果复制成 final 终检。
+job v2 的 direct/revision 使用清单 schema v6：`source_path/source_sha256` 指向稳定 staged 副本，`provider_source_path/provider_source_sha256` 保存渠道原来源，并记录 `dispatch_mode`、`staged_at` 和 `provenance_mode: tool_return`。v6 final 使用 `provenance_mode: derivation`，从父级推导调度模式，不重复写 `dispatch_mode`，并固定写 `visual_checks: null`；独立终检只登记在 job 的 `execution.final_inspections`。job v1 继续按串行语义写 schema v5，v5 final 保留复制父级 `visual_checks` 的兼容行为；同一 task 不得混用版本。
 
-`immutable_identity_sha256` 对 `task_id`、`provider`、`platform`、`product_name` 和按 `(image_id, image_type)` 排序的完整图片身份集合使用规范 JSON 计算。首条产物把当前 job 的完整身份绑定到清单；后续 direct/revision/final 必须使用同一值。当前 job 与任一历史清单行不一致时，`capture`、`finalize`、`verify` 全部阻塞，并要求建立新 task 和独立输出根目录/清单。
+direct/revision 的检查者必须同时不同于生成 Session 和 `main_session_id`。检查时间不得早于 `staged_at`；`visual_checks` 固定包含：
+
+- `current_product`、`english_only`、`no_pollution`
+- `product_preserved`、`scale_correct`、`text_correct`
+- `platform_compliant`
+
+accepted 七项必须全为 `true`；rejected 至少一项为 `false`，必须有具体 `rejection_reason` 且不占 direct 序号。final 清单不复制来源检查结果；其独立终检仍由主 Session 将检查 Subagent 回传内容原样写入 `execution.final_inspections`。
+
+清单和 attempt 保存绝对路径、SHA256、审批范围、Session、提示词、快照、来源、目标、检查和血缘字段。具体 job 字段见 [task-and-prompt-contract.md](task-and-prompt-contract.md)，命令与恢复见 [delivery-and-validation.md](delivery-and-validation.md)。
 
 ## 7. 失败与交接
 
-渠道超时、中断或工具未稳定进入下一次调用时，本次不算完成。把提示词、快照、调用时间和失败原因追加到任务 JSON 的 `attempts`，再从缺失的图号和 `direct_index` 继续。任何已复制但来源或内容不合格的图片必须隔离并登记 `rejected`；不得进入最终目录。
+生成 Subagent 不给出验收结论；检查 Subagent 不提交状态。`failure_type` 只使用下表七项：
 
-已登记的 `accepted direct` 若后验发现文件损坏、哈希变化、视觉误判或审批范围已变化，不能删改旧记录、覆盖旧路径或把旧状态原地改成 rejected。用更大的 `attempt_no` 生成替代 direct，保持同一 `direct_index`，并通过 `supersedes_artifact_id` 指向当前有效旧记录、填写 `supersession_reason`。替代文件名追加 `_replacement<attempt_no>`；验证器只把当前审批范围且位于替换链末端的版本计入三版，并把从旧记录派生的 revision/final 视为失效，随后生成新 final。
+| `failure_type` | 使用条件 | attempt 结果 |
+|---|---|---|
+| `completed_without_path` | 渠道已结束，但没有返回明确路径 | `failed` |
+| `timeout` | 超时且无法确认调用终止 | `unresolved` |
+| `interrupted` | 中断且无法确认调用终止 | `unresolved` |
+| `timeout` / `interrupted` | 已确认调用终止，并传 `termination_confirmed=true` | `failed` |
+| `provider_error` | 渠道明确报错且调用已结束 | `failed` |
+| `source_invalid` | 明确路径越界、不可读、非 PNG、重复或不属于当前 attempt | `failed` |
+| `stage_error` | 调用已结束，但暂存无法完成且没有可恢复的同哈希孤儿 | `failed` |
+| `other` | 其他已确定、无法归入以上类别的失败；原因必须具体 | `failed` |
 
-生成 Subagent 向主 Session 交回候选路径和调用信息，不给出验收结论。检查 Subagent 单独交回：`inspection_session_id`、检查时间、非空结论、七项视觉检查及拒绝原因。主 Session 完成 `capture` 后汇总 `task_id`、图号、渠道、每次尝试号、提示词路径及哈希、产物编号、`direct_index`、状态、拒绝原因、源/目标路径与哈希、尺寸和仍缺版本。
+`fail` 必须记录 `failure_reason`、`failure_recorded_at` 和 `termination_confirmed`。终止不明时只等待原 attempt 的迟到明确路径；确认终止后可把原 unresolved attempt 转为 failed。检查 Subagent 暂时不可用时保留 `staged` 等待恢复，不得用失败分类释放槽位。已暂存但视觉不合格时仍用 `capture` 登记 rejected，保留证据。
+
+已接受 direct 后验失效时，不改旧记录或覆盖路径；用更大 `attempt_no` 追加 replacement，沿用 `direct_index`，填写 supersession 关系，再重建失效血缘的 final。

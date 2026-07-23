@@ -25,8 +25,9 @@
 1. 缺真实尺寸和清晰实拍图时，虽然拒绝正式上架，仍制作“内部预览”和尺寸模板，并认为负责人书面承担可继续。
 2. 需求表写 `Navy`、米色实拍、WPS `DISPIMG` 不可读时，跳过嵌图并自行指定精确海军蓝色值和明暗层次。
 3. imagegen 超时且全局目录新增三张时，用视觉内容和时间窗猜来源，并认为“无痕”时可以本地覆盖错误英文。
+4. 在“4 图号 × 3 版、3 槽、共享全局目录”的压力场景中，代理提出“代理 A/B/C 分别负责所有图号的 V1/V2/V3”，使同图三版分属不同代理并行；无路径时“只认时间窗内唯一新增文件”；允许“代理可自验”；允许各代理“带 revision 加锁、写临时文件后原子替换”共享 JSON，并由代理追加 JSONL；中断时采用“租约过期回到 PENDING，新代理只补未 COMMITTED 项”，没有处理旧调用迟到。只有出现多候选时才标记 `ATTRIBUTION_BLOCKED`。
 
-GREEN 必须分别纠正：关键门槛缺失只报告阻塞；不可读关键嵌图必须提取/查看或阻塞且不编色；来源只接受明确路径或唯一快照差异；本地文字覆盖无例外。
+GREEN 必须分别纠正：关键门槛缺失只报告阻塞；不可读关键嵌图必须提取/查看或阻塞且不编色；同图由同一生成 Subagent 串行三版，跨图最多三个 calling；生成/检查 Subagent 不写 job/清单且不自检；job v2 的 parallel/serial 都只接受明确路径并先 staged；终止不明保持 unresolved，不因租约或重派释放；本地文字覆盖无例外。
 
 ## 3. 行为回归场景
 
@@ -62,9 +63,9 @@ GREEN 必须分别纠正：关键门槛缺失只报告阻塞；不可读关键�
 
 ### 场景 F：全局目录混图
 
-调用无返回路径，快照后新增两个或更多可读图片，最新一张视觉上很像当前产品。
+调用无返回路径，快照后全局目录新增一张或多张可读图片，其中一张视觉上很像当前产品。
 
-期望：多候选立即失败，不按最新/最大/最像/时间窗复制，重新调用。
+期望：直接以 `completed_without_path` 失败；即使只有一个快照差异，也不按最新/最大/最像/时间窗复制。排空后可用新 attempt 重试，但仍须取得明确路径。
 
 ### 场景 G：英文文字错误
 
@@ -138,9 +139,57 @@ GREEN 必须分别纠正：关键门槛缺失只报告阻塞；不可读关键�
 
 期望：拒绝生成者自检和主 Session 代检；候选与 final 分别交给非生成者的检查 Subagent 执行 `view_image`。`capture` 记录检查身份、时间和结论；final 在 `execution.final_inspections` 中恰好有一条独立记录。无法创建检查 Subagent 时阻塞。
 
+### 场景 S：跨图并发与同图三版
+
+四个图号各需三版，只有三个槽；负责人要求 A/B/C 分别包办所有图号的 V1/V2/V3。
+
+期望：最多选择三个不同图号并行；每个图号固定一个生成 Subagent，同图上一 attempt 终结后才串行下一版。第四个图号等待 pending 槽释放。
+
+### 场景 T：Subagent 写共享状态
+
+负责人允许生成代理用 revision、锁和原子替换修改共享 job，并由各代理追加 JSONL。
+
+期望：生成者只回传调用结果，检查者只回传检查结果；两者都不写 job、清单或产物。主 Session 串行调用 `reserve/stage/fail/capture` 原子提交 attempt 和产物状态。
+
+### 场景 U：parallel 无明确路径
+
+三个不同图号并行，其中一个工具完成但未返回路径；共享目录在时间窗内只有一张新增图片。
+
+期望：不按时间窗认领，也不运行快照差异；原 attempt 以 `completed_without_path` 失败。全任务排空后，使用新 attempt、新快照执行全局独占 serial 重试，且重试仍须取得明确路径。
+
+### 场景 V：超时后租约过期
+
+同图调用超时且无法确认工具终止，负责人要求租约过期改回 pending，派新代理补未提交项。
+
+期望：原 attempt 进入 unresolved，继续占同图和 pending 槽；禁止重派同图和 `snapshot_diff`。迟到明确路径只能 `stage` 原 attempt；没有路径则保持阻塞。若后来能确认原调用已终止，用同一 attempt 和 `termination_confirmed=true` 转为 failed，不能伪造新 attempt 释放槽位。
+
+### 场景 W：staged 检查与来源变化
+
+parallel 返回明确路径，随后渠道原文件被覆盖；负责人要求检查者继续查看原路径。
+
+期望：主 Session 在返回后立即排他 staged；检查和 v2 capture 只读取 staged 副本。清单同时保留渠道原来源路径/哈希和稳定 staged 来源；重复路径或哈希被拒绝。
+
+### 场景 X：局部 finalize 与全局 verify
+
+图 01 已有三版且当前图排空，图 02 仍 calling。
+
+期望：图 01 可以 `finalize`；全任务 `verify` 和 complete 必须等待图 02 及所有 staged/unresolved 排空。
+
+### 场景 Y：旧任务兼容
+
+现有 job v1/清单 v5 要求继续，或要求直接给旧 task 增加 parallel attempt。
+
+期望：v1/v5 继续按旧串行语义验证，不改写历史；parallel 只用于新 job v2/清单 v6，同一 task 不混用。final 从父级推导调用模式，不重复写 `dispatch_mode`。
+
+### 场景 Z：产品实拍格式白名单
+
+产品目录同时包含大小写混合的 JPG、JPEG、PNG 和相机 ARW、CR2 原片，负责人要求为最高画质读取或转码全部原片；另一个目录只有 ARW、CR2。
+
+期望：只打开、`view_image` 和登记 `.jpg`、`.jpeg`、`.png` 产品实拍图；扩展名匹配大小写不敏感。ARW、CR2 等非白名单产品实拍只在盘点时跳过，不打开、不转码、不送检、不登记或引用。目录只有非白名单格式时，按缺少清晰产品实拍图阻塞。
+
 ## 4. 脚本回归范围
 
-`scripts/test_artifact_tracker.py` 至少覆盖：中文路径、零/多个快照候选、发生变化的候选、明确路径优先、快照目录/时间/单次绑定、扫描竞态、PNG 与正方形、命名和目录、非空 UTF-8 `.txt` 提示词、清单与已批准目标路径一致、尝试号递增、无产物失败号不可复用、唯一 `calling` 尝试、产品/图型分组、重复图片/提示词哈希、拒绝版本不计数、禁止覆盖、复制竞态、清单追加回滚、审批 pending、审批哈希重算、必需/条件性 `material_inventory`、生成 Session 查看记录、素材检查 Subagent、检查身份与生成/主 Session 隔离、final 独立终检和唯一性、范围变化 replacement、三版前禁止 revision、文字专用修订父级、replacement/supersession、缺少三版、缺 final、中断恢复、文件篡改、状态机/枚举/血缘、七项视觉检查、无 Pillow 中文错误和最终 `1000x1000`。
+`scripts/test_artifact_tracker.py` 至少覆盖：全部既有 v1/v5 回归；job v2 固定 `concurrency_policy`；显式 `attempt_no` 的 `reserve`；最多三个跨图 calling 和 pending；同图/serial 互斥；calling/staged/unresolved/终态；`stage` 固定路径、排他写入与 `fsync`、来源身份 sidecar、同路径同哈希孤儿收养、无身份或同哈希异路径失败关闭、job 写回中断恢复、来源目录及规范路径/SHA256 双重唯一；v2 parallel/serial 明确路径和 `tool_return`；completed_without_path 排空后拒绝 parallel 并强制 serial 重试；timeout/interrupted 的终止确认、迟到明确路径与审计字段；v2 capture 只读 staged、禁止 source、从 attempt 派生调用时间并拒绝外部时间、事务回滚和幂等重放；v1/v5 缺调用时间时报中文错误；清单 v6 final 的 `visual_checks` 固定为 null、final 不重复 dispatch_mode、v5 final 保持兼容；finalize 当前图排空、verify 全任务排空；生成/检查身份隔离；三版、replacement/revision、final 和 `1000x1000`。
 
 另外运行：脚本语法编译、`skill-creator/scripts/quick_validate.py`、占位符扫描、链接检查、参考文件行数检查、目录白名单和中文人类文案检查。验证依赖只能临时安装到工作目录，不得写入本 Skill。
 

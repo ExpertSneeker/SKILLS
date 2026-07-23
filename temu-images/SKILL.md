@@ -30,7 +30,8 @@ description: 规划、生成、追踪并验收 美国 TEMU 平台商品图片。
 - 不得在提示词中重新描述、推测或设计产品外观；产品结构、面料、纹理和比例只由垫图定义。颜色也由垫图定义，除非逐图 `allowed_product_changes` 已用需求表/色卡证据明确批准颜色变化。
 - 不得按最新、最大、最像或时间窗口猜测全局生成目录中的来源图片。
 - 不得在本地重绘画面、排版或覆盖文字。文字错误只能通过渠道重生或渠道内编辑修正。
-- 不得并行进行本任务的渠道调用，不得跨图沿用图片编号、提示词、人物、文案、版式或场景上下文。
+- 不得并行生成同一图号的三个版本。同一图号固定由同一生成子 Session 串行完成；不同图号最多三个渠道调用并行，且必须通过产物工具占用调用槽。
+- 生成 Subagent 和检查 Subagent 都不得写 `_temu_job.json`、JSONL 清单或产物文件；生成者不得自检，检查者不得提交产物状态。
 - 不得将超时、中断、来源不明、非正方形、内容污染、未经独立检查或视觉检查失败的产物计入三个有效直出版本。
 
 ## 主流程
@@ -39,22 +40,25 @@ description: 规划、生成、追踪并验收 美国 TEMU 平台商品图片。
 2. **规划任务。** 按 [task-and-prompt-contract.md](references/task-and-prompt-contract.md) 登记 `main_session_id` 和完整 `material_inventory`，拆分图号、编写逐图目标与三版提示词策略，并创建 `_temu_job.json`。
 3. **等待确认。** 向用户展示任务范围、输出顺序、原文文案、最小修正、颜色依据、人物选择和阻塞/冲突。只有 `approval.status` 为 `approved` 才能继续；范围变化后确认自动失效。
 4. **选择渠道。** 先读 [provider-contract.md](references/provider-contract.md)，再读对应适配器。当前 `imagegen` 必须读 [provider-imagegen.md](references/provider-imagegen.md)，并在运行时完整读取 `$imagegen` Skill。
-5. **独立生成。** 为一个图号建立一个独立生成子 Session，仅传递该图号的最小任务包。生成 Session 只负责查看本图输入、执行渠道调用和回传候选，不得验收自己的输出。
-6. **独立检查与登记。** 每次候选 `direct/revision` 均交给不同于生成 Session 的检查 Subagent，由其逐张执行 `view_image` 和七项视觉检查；主 Session 收到检查身份、时间、结论后才可执行 `capture`。作废尝试保留记录，但不占 `direct01` 至 `direct03`。
+5. **跨图调度。** 每个图号建立一个独立生成子 Session，同图三版始终在该 Session 内串行；按 [provider-contract.md](references/provider-contract.md) 用 `reserve` 最多放行三个不同图号。生成 Session 只查看本图输入、执行一次渠道调用并返回结构化结果，不写任务或清单。
+6. **暂存、独立检查与登记。** 主 Session 收到渠道明确路径后立即用 `stage` 排他暂存，再把 staged 副本交给独立检查 Subagent。检查者逐张执行 `view_image`，只返回检查身份、时间、非空结论、七项布尔检查和失败时的具体拒绝原因；主 Session 随后执行 `capture`。作废尝试保留记录，但不占 `direct01` 至 `direct03`。
 7. **选版与终稿。** 每个图号取得三个提示词哈希不同、图片哈希不同、正方形且全部通过独立检查的有效直出后，选出最佳 `direct` 或渠道内 `revision`，再用 `finalize` 派生 `1000x1000` 最终 PNG。
-8. **独立终检。** 将每个 final 交给非生成者的检查 Subagent 执行 `view_image` 和七项检查，把唯一终检记录写入 `_temu_job.json.execution.final_inspections`；主 Session 只运行机械验证和汇总结果。
+8. **独立终检。** 将每个 final 交给同时不同于对应生成 Session 和 `main_session_id` 的检查 Subagent 执行 `view_image` 和七项检查，把唯一终检记录写入 `_temu_job.json.execution.final_inspections`；主 Session 只运行机械验证和汇总结果。
 9. **完整验收。** 按 [delivery-and-validation.md](references/delivery-and-validation.md) 运行 `verify` 并交付明确路径。任何错误未清零都不得声称完成。
 
 ## 状态与阻塞
 
-以下情况立即把任务或图号标为 `blocked`：必需素材缺失、关键素材不可读、证据相互冲突无法裁决、需求与平台规则冲突、用户尚未确认或确认已失效、独立生成 Session 或检查 Subagent 不可用、渠道适配器或依赖工具不存在、来源候选无法唯一归属。条件性素材仅因不存在不阻塞。渠道超时或单次产物失败属于可恢复的尝试失败，不得误标为完成；恢复方法由交付参考文件定义。
+以下情况立即把任务或图号标为 `blocked`：必需素材缺失、关键素材不可读、证据相互冲突无法裁决、需求与平台规则冲突、用户尚未确认或确认已失效、独立生成 Session 或检查 Subagent 不可用、渠道适配器或依赖工具不存在、来源候选无法唯一归属。条件性素材仅因不存在不阻塞。无法确认渠道已终止的超时/中断保持 `unresolved` 并继续占槽；不得通过重派同图或快照猜测释放。恢复方法见交付参考文件。
 
 ## 产物工具
 
 使用 `scripts/artifact_tracker.py` 执行机械性高风险操作：
 
 - `snapshot`：记录调用前的图片状态。
-- `capture`：排他保存 `direct` 或渠道内 `revision` 并追加清单。
+- `reserve`：原子登记调用并占用槽位。
+- `stage`：排他暂存唯一渠道来源。
+- `fail`：原子登记失败分类；终止不明时保留 `unresolved`。
+- `capture`：从 staged 副本排他保存 `direct/revision`、追加清单并归档 attempt。
 - `finalize`：从通过验收的 `direct` 或 `revision` 派生 `1000x1000` 最终 PNG。
 - `verify`：检查字段、路径、SHA256、尺寸、派生关系、三版完整性和最终图。
 
