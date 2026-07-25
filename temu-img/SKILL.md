@@ -21,6 +21,7 @@ description: 当使用 Codex 需要依据需求表、产品实拍图、产品尺
 ## 生图工具选择器
 
 - 当前任务明确指定生图工具时使用指定工具；如果 `references/<工具名>.md` 存在，先完整读取该适配器，否则读取该工具自身 skill。
+- `豆包`、`豆包生图`、`Seedream`、`Seedream 5.0 Pro`、`seedream5.0pro` 均指 Seedream 5.0 Pro：完整读取 [seedream.md](references/seedream.md)，并直接运行 `scripts/seedream5_pro.py`。用户明确“用豆包生成”时不得转交 Lovart 或其他生图工具。
 - 未指定生图工具时使用 `$imagegen`，并完整读取 [imagegen.md](references/imagegen.md)。
 - 工具只选择一次，后续统一称“当前生图工具”。
 
