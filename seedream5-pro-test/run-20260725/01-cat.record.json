@@ -1,0 +1,35 @@
+{
+  "prompt_id": "cat-01",
+  "provider": "volcengine-ark",
+  "endpoint": "https://ark.cn-beijing.volces.com/api/v3/images/generations",
+  "request": {
+    "model": "doubao-seedream-5-0-pro-260628",
+    "prompt": "一张由普通用户使用 iPhone 后置摄像头拍摄的自然生活照片，正方形构图。一只健康的橘白短毛猫在阳光柔和的社区公园草地上玩耍，抓拍瞬间，真实毛发与自然光影，轻微手机摄影质感，曝光自然，背景不过度虚化，不要棚拍感，不要插画感。画面内不得出现任何文字、字母、数字、标志、水印或边框。仅出现这一只猫，不出现其他动物或人物。",
+    "size": "1K",
+    "response_format": "url",
+    "output_format": "png",
+    "watermark": false,
+    "optimize_prompt_options": {
+      "mode": "standard"
+    }
+  },
+  "submitted_at": "2026-07-25T16:05:15.0581743+08:00",
+  "completed_at": "2026-07-25T16:06:34.7660733+08:00",
+  "generation_elapsed_ms": 79705.7,
+  "download_started_at": "2026-07-25T16:06:34.7779418+08:00",
+  "download_completed_at": "2026-07-25T16:06:35.5405944+08:00",
+  "download_elapsed_ms": 762.4,
+  "output_file": "C:\\Users\\Lenovo\\Desktop\\SKILLS\\seedream5-pro-test\\run-20260725\\01-cat.png",
+  "width": 1024,
+  "height": 1024,
+  "bytes": 2494057,
+  "sha256": "7310494890f9c85ca9949cbabe3ee22f901598846e8a931ddf0988b82b2ac3bb",
+  "temporary_url_ttl": "24h per provider documentation",
+  "provider_created": 1784966794,
+  "provider_usage": {
+    "input_images": 0,
+    "generated_images": 1,
+    "output_tokens": 4096,
+    "total_tokens": 4096
+  }
+}

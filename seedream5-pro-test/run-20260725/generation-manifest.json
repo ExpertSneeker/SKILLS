@@ -1,0 +1,181 @@
+[
+  {
+    "prompt_id": "cat-01",
+    "provider": "volcengine-ark",
+    "endpoint": "https://ark.cn-beijing.volces.com/api/v3/images/generations",
+    "request": {
+      "model": "doubao-seedream-5-0-pro-260628",
+      "prompt": "一张由普通用户使用 iPhone 后置摄像头拍摄的自然生活照片，正方形构图。一只健康的橘白短毛猫在阳光柔和的社区公园草地上玩耍，抓拍瞬间，真实毛发与自然光影，轻微手机摄影质感，曝光自然，背景不过度虚化，不要棚拍感，不要插画感。画面内不得出现任何文字、字母、数字、标志、水印或边框。仅出现这一只猫，不出现其他动物或人物。",
+      "size": "1K",
+      "response_format": "url",
+      "output_format": "png",
+      "watermark": false,
+      "optimize_prompt_options": {
+        "mode": "standard"
+      }
+    },
+    "submitted_at": "2026-07-25T16:05:15.0581743+08:00",
+    "completed_at": "2026-07-25T16:06:34.7660733+08:00",
+    "generation_elapsed_ms": 79705.7,
+    "download_started_at": "2026-07-25T16:06:34.7779418+08:00",
+    "download_completed_at": "2026-07-25T16:06:35.5405944+08:00",
+    "download_elapsed_ms": 762.4,
+    "output_file": "C:\\Users\\Lenovo\\Desktop\\SKILLS\\seedream5-pro-test\\run-20260725\\01-cat.png",
+    "width": 1024,
+    "height": 1024,
+    "bytes": 2494057,
+    "sha256": "7310494890f9c85ca9949cbabe3ee22f901598846e8a931ddf0988b82b2ac3bb",
+    "temporary_url_ttl": "24h per provider documentation",
+    "provider_created": 1784966794,
+    "provider_usage": {
+      "input_images": 0,
+      "generated_images": 1,
+      "output_tokens": 4096,
+      "total_tokens": 4096
+    }
+  },
+  {
+    "prompt_id": "dog-01",
+    "provider": "volcengine-ark",
+    "endpoint": "https://ark.cn-beijing.volces.com/api/v3/images/generations",
+    "request": {
+      "model": "doubao-seedream-5-0-pro-260628",
+      "prompt": "一张由普通用户使用 iPhone 后置摄像头拍摄的自然生活照片，正方形构图。一只健康的成年金毛寻回犬在阳光柔和的社区公园草地上轻快奔跑玩耍，抓拍瞬间，真实毛发与自然光影，轻微手机摄影质感，曝光自然，背景不过度虚化，不要棚拍感，不要插画感。画面内不得出现任何文字、字母、数字、标志、水印或边框。仅出现这一条狗，不出现其他动物或人物。",
+      "size": "1K",
+      "response_format": "url",
+      "output_format": "png",
+      "watermark": false,
+      "optimize_prompt_options": {
+        "mode": "standard"
+      }
+    },
+    "submitted_at": "2026-07-25T16:07:28.2852576+08:00",
+    "completed_at": "2026-07-25T16:08:47.0022842+08:00",
+    "generation_elapsed_ms": 78715.1,
+    "download_started_at": "2026-07-25T16:08:47.0140628+08:00",
+    "download_completed_at": "2026-07-25T16:08:48.0398248+08:00",
+    "download_elapsed_ms": 1025.4,
+    "output_file": "C:\\Users\\Lenovo\\Desktop\\SKILLS\\seedream5-pro-test\\run-20260725\\02-dog.png",
+    "width": 1024,
+    "height": 1024,
+    "bytes": 2392051,
+    "sha256": "5990ffb30423f2e2057bd6b1b2a00850ad0205e76174e6376d77119545d5621d",
+    "temporary_url_ttl": "24h per provider documentation",
+    "provider_created": 1784966927,
+    "provider_usage": {
+      "input_images": 0,
+      "generated_images": 1,
+      "output_tokens": 4096,
+      "total_tokens": 4096
+    }
+  },
+  {
+    "prompt_id": "animal-protection-poster-01",
+    "provider": "volcengine-ark",
+    "endpoint": "https://ark.cn-beijing.volces.com/api/v3/images/generations",
+    "request": {
+      "model": "doubao-seedream-5-0-pro-260628",
+      "prompt": "创作一张正方形、专业且版式丰富的动物保护公益海报。严格使用图 1 的橘白短毛猫和图 2 的金毛寻回犬作为画面中仅有的两只动物，保留它们各自可辨识的毛色、脸部特征、体型与真实摄影质感，不改变品种。重新构建二者在明亮、安全、自然的城市公园草地上友好追逐玩耍的温暖场景，动作自然、关系亲密，体现动物值得被善待与保护。使用全幅真实摄影作为主体视觉，配合清晰的信息层级、适度留白、绿色与珊瑚红点缀、专业公益机构级平面设计。准确呈现中文主标题“守护每一份生命”，副标题“领养代替购买 · 拒绝遗弃与伤害”，辅助短句“尊重 · 关爱 · 责任”。所有文字必须准确、完整、清晰、易读，不得乱码或重复；不得出现其他文字、英文、数字、二维码、品牌标志或水印。",
+      "image": [
+        {
+          "index": 1,
+          "role": "cat reference",
+          "file": "C:\\Users\\Lenovo\\Desktop\\SKILLS\\seedream5-pro-test\\run-20260725\\01-cat.png",
+          "bytes": 2494057,
+          "sha256": "7310494890f9c85ca9949cbabe3ee22f901598846e8a931ddf0988b82b2ac3bb"
+        },
+        {
+          "index": 2,
+          "role": "dog reference",
+          "file": "C:\\Users\\Lenovo\\Desktop\\SKILLS\\seedream5-pro-test\\run-20260725\\02-dog.png",
+          "bytes": 2392051,
+          "sha256": "5990ffb30423f2e2057bd6b1b2a00850ad0205e76174e6376d77119545d5621d"
+        }
+      ],
+      "size": "1K",
+      "response_format": "url",
+      "output_format": "png",
+      "watermark": false,
+      "optimize_prompt_options": {
+        "mode": "standard"
+      }
+    },
+    "submitted_at": "2026-07-25T16:10:02.3918681+08:00",
+    "completed_at": "2026-07-25T16:11:06.9078253+08:00",
+    "generation_elapsed_ms": 64514.1,
+    "download_started_at": "2026-07-25T16:11:06.9102215+08:00",
+    "download_completed_at": "2026-07-25T16:11:07.2720832+08:00",
+    "download_elapsed_ms": 361.7,
+    "output_file": "C:\\Users\\Lenovo\\Desktop\\SKILLS\\seedream5-pro-test\\run-20260725\\03-animal-protection-poster.png",
+    "width": 1024,
+    "height": 1024,
+    "bytes": 2322105,
+    "sha256": "6b81a206bc004f51e3064a0ef94d39c9e8a9968bbe51c054edd742839dc17d67",
+    "temporary_url_ttl": "24h per provider documentation",
+    "provider_created": 1784967066,
+    "provider_usage": {
+      "input_images": 2,
+      "generated_images": 1,
+      "output_tokens": 4096,
+      "total_tokens": 4096
+    }
+  },
+  {
+    "prompt_id": "animal-protection-poster-02-correction",
+    "provider": "volcengine-ark",
+    "endpoint": "https://ark.cn-beijing.volces.com/api/v3/images/generations",
+    "request": {
+      "model": "doubao-seedream-5-0-pro-260628",
+      "prompt": "编辑图 1 的动物保护海报。删除画面中间靠后的那只较小金毛犬，并用自然连续的草地和背景填补移除区域。最终画面必须总共且仅有两只动物：左侧一只橘白短毛猫、右侧一只金毛寻回犬；禁止复制、重影或新增任何动物与人物。参考图 2 保持猫的毛色与面部身份，参考图 3 保持狗的毛色与面部身份。让保留的猫和狗呈现友好追逐玩耍的自然关系。严格保持图 1 的正方形构图、天空、树木、长椅、自然光、版式、颜色以及全部现有中文文字不变；文字必须仍为“守护每一份生命”“领养代替购买 · 拒绝遗弃与伤害”“尊重 · 关爱 · 责任”，不得改字、漏字、增字或乱码。不得出现品牌标志、二维码、水印或其他文字。",
+      "image": [
+        {
+          "index": 1,
+          "role": "poster edit target",
+          "file": "C:\\Users\\Lenovo\\Desktop\\SKILLS\\seedream5-pro-test\\run-20260725\\03-animal-protection-poster.png",
+          "bytes": 2322105,
+          "sha256": "6b81a206bc004f51e3064a0ef94d39c9e8a9968bbe51c054edd742839dc17d67"
+        },
+        {
+          "index": 2,
+          "role": "cat identity reference",
+          "file": "C:\\Users\\Lenovo\\Desktop\\SKILLS\\seedream5-pro-test\\run-20260725\\01-cat.png",
+          "bytes": 2494057,
+          "sha256": "7310494890f9c85ca9949cbabe3ee22f901598846e8a931ddf0988b82b2ac3bb"
+        },
+        {
+          "index": 3,
+          "role": "dog identity reference",
+          "file": "C:\\Users\\Lenovo\\Desktop\\SKILLS\\seedream5-pro-test\\run-20260725\\02-dog.png",
+          "bytes": 2392051,
+          "sha256": "5990ffb30423f2e2057bd6b1b2a00850ad0205e76174e6376d77119545d5621d"
+        }
+      ],
+      "size": "1K",
+      "response_format": "url",
+      "output_format": "png",
+      "watermark": false,
+      "optimize_prompt_options": {
+        "mode": "standard"
+      }
+    },
+    "submitted_at": "2026-07-25T16:12:39.6289052+08:00",
+    "completed_at": "2026-07-25T16:13:58.3004906+08:00",
+    "generation_elapsed_ms": 78669.6,
+    "download_started_at": "2026-07-25T16:13:58.3029894+08:00",
+    "download_completed_at": "2026-07-25T16:14:03.7122876+08:00",
+    "download_elapsed_ms": 5409.1,
+    "output_file": "C:\\Users\\Lenovo\\Desktop\\SKILLS\\seedream5-pro-test\\run-20260725\\04-animal-protection-poster-v2.png",
+    "width": 1024,
+    "height": 1024,
+    "bytes": 2500986,
+    "sha256": "6cb72bed660d61a7820355e45708d70194037c06653fec657b3d88fc92e8a71e",
+    "temporary_url_ttl": "24h per provider documentation",
+    "provider_created": 1784967238,
+    "provider_usage": {
+      "input_images": 3,
+      "generated_images": 1,
+      "output_tokens": 4096,
+      "total_tokens": 4096
+    }
+  }
+]

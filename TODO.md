@@ -10,3 +10,4 @@
 - [ ] 完整读取 $Lovart-API 的生图原理/流程和规范，同时参考Github的说明：https://github.com/lovartai/lovart-skill/tree/main
     - [ ] 最小代码实现接入Lovart-api生图功能，可指定生图模型，编写references/lovart-api.md
     - [ ] 在SKILL.md中的生图工具选择器中假如lovart-api.md的路径与相关简单介绍
+- [x] 最小改动优化Skill图片生成风格提示词中的文案字体/配色来源/版式等

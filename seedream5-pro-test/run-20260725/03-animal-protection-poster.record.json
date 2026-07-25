@@ -1,0 +1,51 @@
+{
+  "prompt_id": "animal-protection-poster-01",
+  "provider": "volcengine-ark",
+  "endpoint": "https://ark.cn-beijing.volces.com/api/v3/images/generations",
+  "request": {
+    "model": "doubao-seedream-5-0-pro-260628",
+    "prompt": "创作一张正方形、专业且版式丰富的动物保护公益海报。严格使用图 1 的橘白短毛猫和图 2 的金毛寻回犬作为画面中仅有的两只动物，保留它们各自可辨识的毛色、脸部特征、体型与真实摄影质感，不改变品种。重新构建二者在明亮、安全、自然的城市公园草地上友好追逐玩耍的温暖场景，动作自然、关系亲密，体现动物值得被善待与保护。使用全幅真实摄影作为主体视觉，配合清晰的信息层级、适度留白、绿色与珊瑚红点缀、专业公益机构级平面设计。准确呈现中文主标题“守护每一份生命”，副标题“领养代替购买 · 拒绝遗弃与伤害”，辅助短句“尊重 · 关爱 · 责任”。所有文字必须准确、完整、清晰、易读，不得乱码或重复；不得出现其他文字、英文、数字、二维码、品牌标志或水印。",
+    "image": [
+      {
+        "index": 1,
+        "role": "cat reference",
+        "file": "C:\\Users\\Lenovo\\Desktop\\SKILLS\\seedream5-pro-test\\run-20260725\\01-cat.png",
+        "bytes": 2494057,
+        "sha256": "7310494890f9c85ca9949cbabe3ee22f901598846e8a931ddf0988b82b2ac3bb"
+      },
+      {
+        "index": 2,
+        "role": "dog reference",
+        "file": "C:\\Users\\Lenovo\\Desktop\\SKILLS\\seedream5-pro-test\\run-20260725\\02-dog.png",
+        "bytes": 2392051,
+        "sha256": "5990ffb30423f2e2057bd6b1b2a00850ad0205e76174e6376d77119545d5621d"
+      }
+    ],
+    "size": "1K",
+    "response_format": "url",
+    "output_format": "png",
+    "watermark": false,
+    "optimize_prompt_options": {
+      "mode": "standard"
+    }
+  },
+  "submitted_at": "2026-07-25T16:10:02.3918681+08:00",
+  "completed_at": "2026-07-25T16:11:06.9078253+08:00",
+  "generation_elapsed_ms": 64514.1,
+  "download_started_at": "2026-07-25T16:11:06.9102215+08:00",
+  "download_completed_at": "2026-07-25T16:11:07.2720832+08:00",
+  "download_elapsed_ms": 361.7,
+  "output_file": "C:\\Users\\Lenovo\\Desktop\\SKILLS\\seedream5-pro-test\\run-20260725\\03-animal-protection-poster.png",
+  "width": 1024,
+  "height": 1024,
+  "bytes": 2322105,
+  "sha256": "6b81a206bc004f51e3064a0ef94d39c9e8a9968bbe51c054edd742839dc17d67",
+  "temporary_url_ttl": "24h per provider documentation",
+  "provider_created": 1784967066,
+  "provider_usage": {
+    "input_images": 2,
+    "generated_images": 1,
+    "output_tokens": 4096,
+    "total_tokens": 4096
+  }
+}
