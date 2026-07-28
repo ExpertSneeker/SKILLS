@@ -4,17 +4,17 @@
 
 ## 固定调用
 
-- 直接运行 `scripts/seedream5_pro.py`，不用 Lovart 或其他生图工具。
+- 直接运行 `<temu-img-skill-dir>\scripts\seedream5_pro.py`，其中 `<temu-img-skill-dir>` 使用当前 skill 的绝对路径。
 - 模型为 `doubao-seedream-5-0-pro-260628`，endpoint 为 `https://ark.cn-beijing.volces.com/api/v3/images/generations`。脚本固定 `output_format=png`、`response_format=url`、`watermark=false`、`optimize_prompt_options.mode=standard`。
 - 默认 `--size 1K`；只有用户明确要求时才使用 `2K`。
 - 命令形状：
 
 ```powershell
-python scripts/seedream5_pro.py --prompt-file <absolute-utf8-file> --output <absolute-png-file> [--input "role=C:\path\image.jpg"]... [--size 1K|2K]
+python <temu-img-skill-dir>\scripts\seedream5_pro.py --prompt-file <absolute-utf8-file> --output <absolute-png-file> [--input "role=C:\path\image.jpg"]... [--size 1K|2K]
 ```
 
 - `0` 图是文生图，`1` 图是图生图，`2-10` 图是有序多图；`--input` 角色顺序必须与提示词中的图 N 一致。
-- 从 `temu-img` 作为工作目录运行命令。输出统一在 `./output/seedream5-pro-direct`，即 `<temu-img>/output/seedream5-pro-direct`；例如输出参数使用该目录下的绝对路径 `C:\...\temu-img\output\seedream5-pro-direct\direct01.png`。脚本在同目录原子写入 `_records/<stem>.call.json`。
+- 保持当前 TEMU 产品目录为工作目录；有效 direct 图保存到该目录的 `./output/seedream5-pro-direct`。`--output` 使用该目录下目标 PNG 的绝对路径，脚本在同目录原子写入 `_records/<stem>.call.json`。
 
 ## 输入与产品真实性
 
