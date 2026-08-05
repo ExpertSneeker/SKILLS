@@ -1,0 +1,7 @@
+interface:
+  display_name: "初始化 2560px 图片"
+  short_description: "将原始图片初始化为 2560px 副本并生成清单"
+  default_prompt: "使用 $init-2560px-images 初始化当前任务的 2560px 图片。"
+
+policy:
+  allow_implicit_invocation: false

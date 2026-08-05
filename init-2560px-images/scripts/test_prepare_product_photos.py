@@ -121,7 +121,7 @@ class PrepareProductPhotosTests(unittest.TestCase):
         result = self.run_script()
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("no supported product photos", result.stderr)
+        self.assertIn("no supported images", result.stderr)
         self.assertFalse((self.task / OUTPUT_DIR / "_manifest.json").exists())
 
     def test_reuses_unchanged_target_and_rebuilds_corruption_or_changed_source(self):

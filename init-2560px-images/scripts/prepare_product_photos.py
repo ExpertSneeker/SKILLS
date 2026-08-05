@@ -1,4 +1,4 @@
-"""Prepare traceable 2560px product photos without exposing camera originals."""
+"""Prepare traceable 2560px images without exposing originals."""
 
 import argparse
 from contextlib import contextmanager
@@ -51,11 +51,11 @@ def resolve_shortcut(path):
         raise PreparationError(str(path) + " does not exist; pass --source")
     command = (
         "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
-        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:TEMU_PRODUCT_PHOTO_SHORTCUT);"
+        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:INIT_2560PX_IMAGE_SHORTCUT);"
         "[Console]::Write($s.TargetPath)"
     )
     environment = os.environ.copy()
-    environment["TEMU_PRODUCT_PHOTO_SHORTCUT"] = str(path)
+    environment["INIT_2560PX_IMAGE_SHORTCUT"] = str(path)
     result = subprocess.run(
         ["powershell", "-NoProfile", "-Command", command],
         env=environment,
@@ -88,7 +88,7 @@ def task_lock(path):
                 import fcntl
                 fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
-            raise PreparationError("product photo preparation is already running") from exc
+            raise PreparationError("image preparation is already running") from exc
         try:
             yield
         finally:
@@ -223,7 +223,7 @@ def prepare(task_root, source=None):
         source_root = directory(source, "source")
     target_root = task_root / OUTPUT_DIR_NAME
     if source_root == task_root or source_root == target_root:
-        raise PreparationError("source must be the original product photo directory, not the task root")
+        raise PreparationError("source must be the original image directory, not the task root")
 
     candidates = sorted(
         (path for path in source_root.rglob("*")
@@ -231,7 +231,7 @@ def prepare(task_root, source=None):
         key=lambda path: path.relative_to(source_root).as_posix().casefold(),
     )
     if not candidates:
-        raise PreparationError("no supported product photos found")
+        raise PreparationError("no supported images found")
 
     target_root.mkdir(parents=True, exist_ok=True)
     manifest_path = target_root / MANIFEST_NAME
