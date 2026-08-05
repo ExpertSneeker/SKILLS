@@ -17,7 +17,7 @@
 ## view_image 与图片角色
 
 - 所有参与生图的图片必须先执行 `view_image`；未执行的图片不得声称已提供给模型。
-- 产品实拍输入只允许使用 `3000px拍摄图/_manifest.json` 登记的目标文件；原始拍摄图禁止执行 `view_image`，也不得出现在输入角色中。
+- 产品实拍输入只允许使用 `2560px拍摄图/_manifest.json` 登记的目标文件；原始拍摄图禁止执行 `view_image`，也不得出现在输入角色中。
 - 单图 Subagent 必须记录每张输入图的角色：
   - Image 1 = edit target / base image
   - Image 2 = primary product identity reference

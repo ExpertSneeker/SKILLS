@@ -16,12 +16,12 @@ description: 当使用 Codex 需要依据需求表、产品实拍图、产品尺
 - [ ] 已确认采用“主 Agent 规划、单图 Subagent 生成”
 - [ ] 已确认所有参与图生图的预处理后实拍图与其他参考图片都先执行 `view_image`
 - [ ] 已检查 VI 手册、产品图、参考图、面料图、色卡图、颜色代号图等素材可读
-- [ ] 已按 [photo-preprocessing.md](references/photo-preprocessing.md) 成功生成 `3000px拍摄图/_manifest.json`，且映射中至少有一张产品实拍图
+- [ ] 已按 [photo-preprocessing.md](references/photo-preprocessing.md) 成功生成 `2560px拍摄图/_manifest.json`，且映射中至少有一张产品实拍图
 
 ## 拍摄图输入门禁
 
 - 完整读取 [photo-preprocessing.md](references/photo-preprocessing.md)。原始拍摄图只允许预处理脚本读取，禁止执行 `view_image` 或提供给任何 Agent 和生图工具。
-- 本 Skill 后文的“产品实拍图”“产品实拍”“实拍输入”和“产品垫图”均指当前任务 `3000px拍摄图/_manifest.json` 中登记的目标文件，不指原始拍摄图。
+- 本 Skill 后文的“产品实拍图”“产品实拍”“实拍输入”和“产品垫图”均指当前任务 `2560px拍摄图/_manifest.json` 中登记的目标文件，不指原始拍摄图。
 
 ## 生图工具选择器
 

@@ -10,7 +10,7 @@ from PIL import Image
 
 
 SCRIPT = Path(__file__).with_name("prepare_product_photos.py")
-OUTPUT_DIR = "3000px拍摄图"
+OUTPUT_DIR = "2560px拍摄图"
 
 
 class PrepareProductPhotosTests(unittest.TestCase):
@@ -74,9 +74,9 @@ class PrepareProductPhotosTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         expected = {
-            "rotated.JPG": ("JPEG", (1500, 3000)),
-            "camera.JPG": ("JPEG", (3000, 1500)),
-            "tall.png": ("PNG", (750, 3000)),
+            "rotated.JPG": ("JPEG", (1280, 2560)),
+            "camera.JPG": ("JPEG", (2560, 1280)),
+            "tall.png": ("PNG", (640, 2560)),
         }
         for name, (image_format, size) in expected.items():
             with self.subTest(name=name), Image.open(self.task / OUTPUT_DIR / name) as image:

@@ -1,4 +1,4 @@
-"""Prepare traceable 3000px product photos without exposing camera originals."""
+"""Prepare traceable 2560px product photos without exposing camera originals."""
 
 import argparse
 from contextlib import contextmanager
@@ -14,8 +14,8 @@ import tempfile
 from PIL import Image, ImageOps
 
 
-MAX_LONG_EDGE = 3000
-OUTPUT_DIR_NAME = "3000px拍摄图"
+MAX_LONG_EDGE = 2560
+OUTPUT_DIR_NAME = "2560px拍摄图"
 MANIFEST_NAME = "_manifest.json"
 LOCK_NAME = "_prepare.lock"
 SHORTCUT_NAME = "产品拍摄原图.lnk"
