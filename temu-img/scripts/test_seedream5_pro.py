@@ -128,6 +128,20 @@ class Seedream5ProTests(unittest.TestCase):
         self.assertNotIn("test-secret", record)
         self.assertNotIn(base64.b64encode(source.read_bytes()).decode(), record)
 
+    def test_jpg_mpo_input_is_sent_as_jpeg(self):
+        source = self.root / "camera.jpg"
+        first = Image.new("RGB", (30, 31), "red")
+        second = Image.new("RGB", (30, 31), "blue")
+        first.save(source, format="MPO", save_all=True, append_images=[second])
+        http = HTTP([generation()], [png()])
+
+        try:
+            self.call(http, inputs=[("main", source)])
+        except self.m.ValidationError as exc:
+            self.fail(str(exc))
+
+        self.assertTrue(http.post_requests[0]["image"].startswith("data:image/jpeg;base64,"))
+
     def test_many_inputs_preserve_order_and_explicit_2k(self):
         paths = []
         for name, color in [("front", "red"), ("back", "blue")]:
