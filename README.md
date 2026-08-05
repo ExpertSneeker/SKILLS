@@ -1,6 +1,6 @@
 # SKILLS
 
-个人 Codex 技能集合。
+Codex Skill集合。
 
 ## `temu-img`
 
@@ -11,4 +11,4 @@
 ## 维护
 
 - 待办：[TODO.md](TODO.md)
-- 归档技能：[Archive/](Archive/)
+- 归档Skill：[Archive/](Archive/)
