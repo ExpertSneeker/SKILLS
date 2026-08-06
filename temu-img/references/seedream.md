@@ -25,7 +25,7 @@ python <temu-img-skill-dir>\scripts\seedream5_pro.py --prompt-file <absolute-utf
 ## 任务清单与并行
 
 - 每次执行前列出固定任务清单：图号、`direct01`/`direct02`/`direct03`、提示词文件、输入角色、输出路径与尺寸。
-- 默认一次只允许 3 个预声明的初始 generation POST；运行中不得动态追加替代任务。独立任务最多 `min(n, 8)` 并行；有输入依赖的任务分波执行；相同输出路径不得并发。
+- 最多同时执行 3 个预声明的 generation POST；该上限只计算正在调用生图接口的单版生成 Subagent，其他 Subagent 不计入。不同图号独立推进，同一图号的 direct 仍按通用验收门禁串行；各任务继续使用唯一输出路径和 `_records/<stem>.call.json` 原子记录。
 
 ## 恢复与记录
 
