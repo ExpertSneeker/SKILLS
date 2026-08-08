@@ -18,14 +18,14 @@ python <temu-img-skill-dir>\scripts\seedream5_pro.py --prompt-file <absolute-utf
 
 ## 输入与产品真实性
 
-- 所有输入先 `view_image`。只支持 JPEG/PNG；每张本地文件不超过 30 MB、3,600 万像素。
-- TEMU 产品图继续强制使用实拍输入，遵守 [generation-workflow.md](generation-workflow.md) 的产品真实性规则。纯文生仅用于不涉及产品真实性的信息页。
+- 所有输入先 `view_image`。只支持 JPEG/PNG；`.jpg/.jpeg` 文件中的 MPO 按 JPEG 输入处理。每张本地文件不超过 30 MB、3,600 万像素。
+- TEMU 产品图继续强制使用 `2560px拍摄图/_manifest.json` 登记的实拍输入，禁止使用原始拍摄图路径，并遵守 [generation-workflow.md](generation-workflow.md) 的产品真实性规则。纯文生仅用于不涉及产品真实性的信息页。
 - 不实现组图、流式、联网、交互编辑。
 
-## 任务清单与并行
+## 任务清单与串行
 
 - 每次执行前列出固定任务清单：图号、`direct01`/`direct02`/`direct03`、提示词文件、输入角色、输出路径与尺寸。
-- 默认一次只允许 3 个预声明的初始 generation POST；运行中不得动态追加替代任务。独立任务最多 `min(n, 8)` 并行；有输入依赖的任务分波执行；相同输出路径不得并发。
+- 所有图号全局串行，同一时间只允许一个单版生成 Subagent 执行一个预声明的 generation POST；其他 Subagent 不计入生图上限。运行中不得动态追加替代任务；各任务继续使用唯一输出路径和 `_records/<stem>.call.json` 原子记录。
 
 ## 恢复与记录
 

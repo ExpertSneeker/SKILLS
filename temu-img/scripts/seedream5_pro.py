@@ -101,11 +101,11 @@ def input_info(role, path):
             fmt, width, height = image.format, image.width, image.height
     except (OSError, ValueError) as exc:
         raise ValidationError("input is not a valid JPEG or PNG") from exc
-    if fmt not in ("JPEG", "PNG"):
+    if fmt not in ("JPEG", "PNG", "MPO") or (fmt == "MPO" and path.suffix.lower() not in (".jpg", ".jpeg")):
         raise ValidationError("input must be JPEG or PNG")
     if width <= 14 or height <= 14 or not 1 / 16 <= width / height <= 16 or width * height > 36_000_000:
         raise ValidationError("input dimensions are outside API limits")
-    mime = "image/jpeg" if fmt == "JPEG" else "image/png"
+    mime = "image/jpeg" if fmt in ("JPEG", "MPO") else "image/png"
     return {
         "role": role, "path": str(path), "mime": mime, "width": width, "height": height,
         "bytes": size, "sha256": sha256(raw), "data_uri": "data:" + mime + ";base64," + base64.b64encode(raw).decode("ascii"),
