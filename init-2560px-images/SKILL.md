@@ -13,7 +13,8 @@ description: 仅在用户明确调用 $init-2560px-images，并要求把 JPG、J
 python <skill-dir>\scripts\prepare_product_photos.py --task-root <任务根目录绝对路径> [--source <原始拍摄图目录绝对路径>]
 ```
 
-- 未传 `--source` 时，只解析任务根目录下的 `产品拍摄原图.lnk`。
+- 未传 `--source` 时，解析任务根目录下的 `产品拍摄原图.lnk`。
+- 如果`产品拍摄原图.lnk`不存在，则寻找类似 `产品实拍图`、`拍摄图`等类似目录，如果目录中确实有包含相机原格式与JPG格式，则直接使用，否则向用户确认。
 - 只允许脚本读取原始图片；不得对原图执行 `view_image`，也不得把原图交给 Agent 或其他工具。
 - 脚本仅递归处理 JPG、JPEG 和 PNG。长边不超过 2560px 时原样复制，超过时修正 EXIF 方向并等比缩放。
 
