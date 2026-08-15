@@ -24,12 +24,13 @@ python <temu-img-skill-dir>\scripts\seedream5_pro.py --prompt-file <absolute-utf
 
 ## 任务清单与调用
 
-- 每次执行前列出固定任务清单：图号、`direct01`/`direct02`/`direct03`、提示词文件、输入角色、输出路径与尺寸；预留由合并验收触发的可选 `repair01`，未触发时不执行。
+- 每次执行前列出固定任务清单：图号、`direct01`/`direct02`/`direct03`、提示词文件、输入角色、输出路径与尺寸。
 - 按生成模块派发的每个单版生成 Subagent 只执行一次脚本调用；脚本内部符合条件的网络重试仍属于这一次业务调用。每项继续使用唯一输出路径和 `_records/<stem>.call.json` 原子记录。
+- 脚本成功返回后，生成 Subagent、主 Agent 和其他 Agent 均不得查看生成图片；只按生成模块完成非视觉文件确认并标记 `SAVED`。
 
 ## 恢复与记录
 
 - 每任务 `attempt_count <= 2`。只有脚本识别为官方建议重试的结构化 `429`/`500` 才在同一次脚本调用内自动重试一次。其他明确失败必须先修正输入或原因，再由一个新的技术替补 Subagent 手动重试同一 direct 一次；未知超时、断连或截断标为 `unresolved`，禁止重试。官方未标注不扣费错误，不预设白名单。
-- API 恢复或未产出图片不占用业务 `repair01`；`repair01` 只由三版合并验收的硬错误触发。
+- API 未产出图片或文件确认失败时，只允许按生成模块进行一次技术替补；图片内容不得触发重新生成。
 - 下载失败只恢复一次 GET，不重新 POST。URL 仅 24 小时有效，完成后立即下载。
 - 记录包含提交、生成完成及耗时、下载时序、HTTP/错误码、输出尺寸/字节/SHA256。`ARK_API_KEY` 先从进程环境读取，再读取 Windows Machine；密钥、Authorization 和 Base64 不得落盘。

@@ -1,4 +1,4 @@
 interface:
   display_name: "TEMU 图片"
-  short_description: "按需求表规划、生成并验收 TEMU 美国站商品图片"
-  default_prompt: "使用 $temu-img 根据当前产品文件夹的需求表和实拍素材规划、生成并验收 TEMU 美国站商品图片。"
+  short_description: "按需求表规划并生成 TEMU 美国站商品图片"
+  default_prompt: "使用 $temu-img 根据当前产品文件夹的需求表和实拍素材规划并生成 TEMU 美国站商品图片。"
