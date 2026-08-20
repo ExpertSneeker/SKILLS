@@ -19,7 +19,7 @@ python <temu-img-skill-dir>\scripts\seedream5_pro.py --prompt-file <absolute-utf
 ## 输入与产品真实性
 
 - 所有输入先 `view_image`。只支持 JPEG/PNG；`.jpg/.jpeg` 文件中的 MPO 按 JPEG 输入处理。每张本地文件不超过 30 MB、3,600 万像素。
-- TEMU 产品图继续强制使用 `2560px拍摄图/_manifest.json` 登记的实拍输入，禁止使用原始拍摄图路径，并遵守 [generation-workflow.md](generation-workflow.md) 的产品真实性规则。纯文生仅用于不涉及产品真实性的信息页。
+- TEMU 产品图继续强制使用 `2560px拍摄图/_manifest.json` 登记的实拍输入，禁止使用原始拍摄图路径，并遵守 [generation-workflow.md](generation-workflow.md) 的产品真实性规则；仅设计原则中的海绵纯场景默认分支按“目标画面不出现产品”处理，不传入海绵实拍。纯文生仅用于不涉及产品真实性的信息页及该默认分支。
 - 不实现组图、流式、联网、交互编辑。
 
 ## 任务清单与调用
