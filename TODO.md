@@ -1,7 +1,7 @@
 # Todo list
 
-## temu-img
-> temu-img Skill的功能实现
+## ecom-img
+> ecom-img Skill的功能实现
 
 - [x] 除了定制品之外的产品需要传入产品尺寸，理解产品在现实中的大小，但是不要显式的出现在图中(尺寸图除外)，加在 ## 额外添加的提示词 里
 - [x] 挑选的 edit_target 图片如果展示的是完整产品，必须优先选择能清晰呈现产品整体三维结构的斜俯视三分之四视角（约 30°–45°），确保产品整体轮廓、顶面、侧面、厚度及前后纵深关系清晰可见；不得使用主体被裁切、关键结构被遮挡或因视角过平导致结构难以判断的图片。
@@ -108,12 +108,12 @@
 
 ---
 
-## temu-img：平台规范拆分（Amazon / TEMU）
+## ecom-img：平台规范拆分（Amazon / TEMU）
 
-> 最小改动实现：保留一个 `$temu-img` Skill 和现有通用文件路径，只新增平台规范目录；先确定本套图所属平台，再读取本平台规范。
+> 最小改动实现：保留一个 `$ecom-img` Skill 和现有通用文件路径，只新增平台规范目录；先确定本套图所属平台，再读取本平台规范。
 
 - [x] 保留单一 Skill
-    - [x] 保留 `temu-img` 目录、front matter 中的 `name: temu-img` 和 `$temu-img` 调用方式
+    - [x] 保留 `ecom-img` 目录、front matter 中的 `name: ecom-img` 和 `$ecom-img` 调用方式
     - [x] Amazon 和 TEMU 暂不拆成两个 Skill，避免重复维护相同的产品读取、提示词规划、三版串行、生图和交付流程
     - [x] Plugin 只作为后续分发层，本次不实现
 
@@ -128,7 +128,7 @@
     - [x] 本次不新增平台路由脚本、独立平台上下文文件或规范哈希，沿用现有任务清单和调用记录
 
 ```text
-temu-img/
+ecom-img/
 ├── SKILL.md
 ├── agents/
 │   └── openai.yaml
@@ -165,7 +165,7 @@ temu-img/
     - [x] `custom-product.md` 保留定制产品规则，不因平台改变
     - [x] `delivery.md` 保留路径、命名、哈希、直接保存和不中选规则
     - [x] `imagegen.md` 和 `seedream.md` 继续作为工具适配器，不移动文件，不改变调用和保存逻辑
-    - [x] 保留 `temu_image_inspector` 名称兼容现有调用，仅注明它负责通用产品实拍查看，与平台无关
+    - [x] 产品实拍查看使用通用名称 `product_image_inspector`，与平台无关
     - [x] Amazon/TEMU 的交付类型、图片比例、像素/格式/大小、主图要求、文案语言、单位、提示词前缀、平台合规和交付检查只写入对应平台文件
     - [x] 固定的 `Amazon US E-commerce Product Imagery` 和 A+ 规则从通用文件移入 `amazon.md`
     - [x] 北美/美国市场、图片语言和 `inch` 优先等规则按适用站点写入对应平台文件，不再保留在通用文件
@@ -194,7 +194,7 @@ temu-img/
     - [x] 当前支持的交付类型和图片比例改为由命中平台文件提供，不再在 `SKILL.md` 中写死 Amazon/TEMU 的完整列表
     - [x] 三版提示词冻结前必须已确定平台、交付类型、图片比例、文案语言和单位
     - [x] 派发生成 Subagent 前，提示词中不得残留平台选择说明、候选比例或另一个平台的术语
-    - [x] `agents/openai.yaml` 改为中性展示文案，继续保留 `$temu-img` 调用名
+    - [x] `agents/openai.yaml` 改为中性展示文案，使用 `$ecom-img` 调用名
 
 ---
 

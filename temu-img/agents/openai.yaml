@@ -1,4 +1,0 @@
-interface:
-  display_name: "temu-img"
-  short_description: "按唯一平台规范规划并生成商品图片"
-  default_prompt: "使用 $temu-img 根据当前产品文件夹的需求表和实拍素材，先确定唯一平台，再规划并生成该平台支持的商品图片。"

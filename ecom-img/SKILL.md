@@ -1,5 +1,5 @@
 ---
-name: temu-img
+name: ecom-img
 description: 当使用 Codex 需要依据需求表、产品实拍图、产品尺寸、VI、面料/色卡或版式参考，为 TEMU 或 Amazon 规划或生成商品图片；先从用户要求或需求表确定唯一平台，再按该平台规范处理其支持的交付类型、比例、文案、合规与交付检查。
 ---
 
@@ -24,8 +24,8 @@ description: 当使用 Codex 需要依据需求表、产品实拍图、产品尺
 - [ ] `2560px拍摄图/_manifest.json` 存在，且映射中至少有一张产品实拍图
 - [ ] 已按命中平台规范确认每个图号的交付类型和目标构图比例，并确认内容图型（如场景图 / 尺寸图 / 卖点图 / 颜色图 / SKU 图 / 规格图）
 - [ ] 已确认采用“主 Agent 规划、所有图号全局串行生图、每个 direct 由全新单版生成 Subagent 调用一次生图工具并直接保存”
-- [ ] 已确认 manifest 产品实拍查看显式调用自定义 Subagent `temu_image_inspector`；该兼容名称只表示通用产品实拍查看职责，与命中平台无关，需求表及其他图片由主 Agent 查看和分类
-- [ ] 已确认 `2560px拍摄图/_manifest.json` 登记的实拍图由 `temu_image_inspector` 执行 `view_image`，需求表及其他图片由主 Agent 执行 `view_image`
+- [ ] 已确认 manifest 产品实拍查看显式调用自定义 Subagent `product_image_inspector`，需求表及其他图片由主 Agent 查看和分类
+- [ ] 已确认 `2560px拍摄图/_manifest.json` 登记的实拍图由 `product_image_inspector` 执行 `view_image`，需求表及其他图片由主 Agent 执行 `view_image`
 - [ ] 已检查 VI 手册、产品图、面料图、色卡图、颜色代号图及存在时的参考图等素材可读
 
 ## 拍摄图输入门禁
@@ -60,7 +60,7 @@ description: 当使用 Codex 需要依据需求表、产品实拍图、产品尺
     - 随后完整读取平台门禁唯一命中的平台规范；不得读取另一平台规范。
     - 若用户或需求表明确支持定制，或者尺寸为连续可选区间时，完整读取 [custom-product.md](references/custom-product.md)。
     - 产品实拍图只按拍摄图输入门禁处理；其他不可读取的 JPG/JPEG/PNG 参考图片必须先转码或用其他工具打开。
-2. 确认 `2560px拍摄图/_manifest.json` 映射非空后，显式调用一个全新的 `temu_image_inspector` 查看映射中的全部产品实拍目标文件；主 Agent 根据返回结果锁定产品身份、颜色、纹理、结构、比例和禁止偏离项。
+2. 确认 `2560px拍摄图/_manifest.json` 映射非空后，显式调用一个全新的 `product_image_inspector` 查看映射中的全部产品实拍目标文件；主 Agent 根据返回结果锁定产品身份、颜色、纹理、结构、比例和禁止偏离项。
 3. 主 Agent 读取 `.xlsx/.xls` 需求表中的需求、参考图、文案与语言字段、尺寸、交付类型、内容图型、颜色/SKU 等信息，识别 WPS `DISPIMG` 单元格图片并亲自执行 `view_image`；结合已锁定的产品基准，确定需求表中哪些图片是反推专用参考图。需求表以外的颜色/面料、结构细节、插入或辅助图片也由主 Agent 查看并确定角色。
 4. 从需求表取得并理解产品尺寸，按人物、家具、手持、宠物、儿童或使用场景校验比例，并按设计模块处理需求表与命中平台规范的优先级；
 5. 按设计模块分别处理产品颜色展示和色块素材缺失，不得凭空编造颜色。

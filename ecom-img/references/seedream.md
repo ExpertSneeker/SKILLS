@@ -4,13 +4,13 @@
 
 ## 固定调用
 
-- 直接运行 `<temu-img-skill-dir>\scripts\seedream5_pro.py`，其中 `<temu-img-skill-dir>` 使用当前 skill 的绝对路径。
+- 直接运行 `<ecom-img-skill-dir>\scripts\seedream5_pro.py`，其中 `<ecom-img-skill-dir>` 使用当前 skill 的绝对路径。
 - 模型为 `doubao-seedream-5-0-pro-260628`，endpoint 为 `https://ark.cn-beijing.volces.com/api/v3/images/generations`。脚本固定 `output_format=png`、`response_format=url`、`watermark=false`、`optimize_prompt_options.mode=standard`。
 - 默认 `--size 1K`；只有用户明确要求时才使用 `2K`。
 - 命令形状：
 
 ```powershell
-python <temu-img-skill-dir>\scripts\seedream5_pro.py --prompt-file <absolute-utf8-file> --output <absolute-png-file> [--input "role=C:\path\image.jpg"]... [--size 1K|2K]
+python <ecom-img-skill-dir>\scripts\seedream5_pro.py --prompt-file <absolute-utf8-file> --output <absolute-png-file> [--input "role=C:\path\image.jpg"]... [--size 1K|2K]
 ```
 
 - `0` 图是文生图，`1` 图是图生图，`2-10` 图是有序多图；`--input` 角色顺序必须与提示词中的图 N 一致。
