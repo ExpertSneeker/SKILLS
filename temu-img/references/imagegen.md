@@ -1,6 +1,6 @@
 # imagegen 适配器
 
-选择 `$imagegen` 时，先完整读取其 skill，只使用内置 `image_gen` 工具；不要调用 `scripts/image_gen.py`、CLI/API 回退模式或要求 `OPENAI_API_KEY`。本适配器只补充 TEMU 工作流的来源追踪和防串图要求。
+选择 `$imagegen` 时，先完整读取其 skill，只使用内置 `image_gen` 工具；不要调用 `scripts/image_gen.py`、CLI/API 回退模式或要求 `OPENAI_API_KEY`。本适配器只补充当前电商图片工作流的来源追踪和防串图要求。
 
 ## 调用与来源
 

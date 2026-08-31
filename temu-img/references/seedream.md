@@ -14,12 +14,12 @@ python <temu-img-skill-dir>\scripts\seedream5_pro.py --prompt-file <absolute-utf
 ```
 
 - `0` 图是文生图，`1` 图是图生图，`2-10` 图是有序多图；`--input` 角色顺序必须与提示词中的图 N 一致。
-- 保持当前 TEMU 产品目录为工作目录；有效 direct 图保存到该目录的 `./output/seedream5-pro-direct`。`--output` 使用该目录下目标 PNG 的绝对路径，脚本在同目录原子写入 `_records/<stem>.call.json`。
+- 保持当前任务根目录为工作目录；有效 direct 图保存到该目录的 `./output/seedream5-pro-direct`。`--output` 使用该目录下目标 PNG 的绝对路径，脚本在同目录原子写入 `_records/<stem>.call.json`。
 
 ## 输入与产品真实性
 
 - 所有输入先 `view_image`。只支持 JPEG/PNG；`.jpg/.jpeg` 文件中的 MPO 按 JPEG 输入处理。每张本地文件不超过 30 MB、3,600 万像素。
-- TEMU 产品图继续强制使用 `2560px拍摄图/_manifest.json` 登记的实拍输入，禁止使用原始拍摄图路径，并遵守 [generation-workflow.md](generation-workflow.md) 的产品真实性规则；仅设计原则中的海绵纯场景默认分支按“目标画面不出现产品”处理，不传入海绵实拍。纯文生仅用于不涉及产品真实性的信息页及该默认分支。
+- 当前产品图继续强制使用 `2560px拍摄图/_manifest.json` 登记的实拍输入，禁止使用原始拍摄图路径，并遵守 [generation-workflow.md](generation-workflow.md) 的产品真实性规则；仅设计原则中的海绵纯场景默认分支按“目标画面不出现产品”处理，不传入海绵实拍。纯文生仅用于不涉及产品真实性的信息页及该默认分支。
 - 不实现组图、流式、联网、交互编辑。
 
 ## 任务清单与调用
