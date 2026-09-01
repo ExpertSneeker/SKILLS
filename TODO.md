@@ -20,8 +20,8 @@
 
 ---
 
-- [ ] 拆分平台优化
-    - [ ] 把SKILL.md中的平台规范路径移动到platform/index.md中(SKILL.md:13)
+- [x] 拆分平台优化
+    - [x] 把SKILL.md中的平台规范路径移动到platform/index.md中(SKILL.md:13)
 
 ---
 
