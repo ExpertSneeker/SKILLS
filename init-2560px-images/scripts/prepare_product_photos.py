@@ -107,13 +107,20 @@ def read_manifest(path, source_root, target_root):
     except (OSError, ValueError):
         return {}
     if (
-        manifest.get("version") != 1
+        manifest.get("version") != 2
         or manifest.get("max_long_edge") != MAX_LONG_EDGE
         or manifest.get("source_root") != str(source_root)
-        or manifest.get("target_root") != str(target_root)
+        or manifest.get("target_root") != "."
     ):
         return {}
-    return {item["relative_path"]: item for item in manifest.get("files", [])}
+    entries = {}
+    for item in manifest.get("files", []):
+        relative = item.get("target_path")
+        target_path(target_root, relative)
+        if item.get("relative_path") != relative:
+            raise PreparationError("manifest target_path must match relative_path")
+        entries[relative] = item
+    return entries
 
 
 def write_json_atomic(path, value):
@@ -186,7 +193,18 @@ def resize_atomic(source, target, image_format, target_size):
 
 
 def target_path(root, relative_path):
-    return root.joinpath(*PurePosixPath(relative_path).parts)
+    if not isinstance(relative_path, str) or not relative_path:
+        raise PreparationError("target_path must be a nonempty relative POSIX path")
+    relative = PurePosixPath(relative_path)
+    if (relative.is_absolute() or "\\" in relative_path or ":" in relative_path
+            or ".." in relative.parts or relative_path == "."
+            or relative.as_posix() != relative_path):
+        raise PreparationError("target_path must be a canonical relative POSIX path")
+    root = Path(root).resolve()
+    target = root.joinpath(*relative.parts).resolve()
+    if not target.is_relative_to(root):
+        raise PreparationError("target_path escapes the 2560px image directory")
+    return target
 
 
 def valid_target(item, target):
@@ -198,7 +216,7 @@ def prepared_entry(source, target, relative, stat, source_sha, source_size, targ
     return {
         "relative_path": relative,
         "source_path": str(source),
-        "target_path": str(target),
+        "target_path": relative,
         "source_width": source_size[0],
         "source_height": source_size[1],
         "target_width": target_size[0],
@@ -273,11 +291,11 @@ def prepare(task_root, source=None):
             ))
 
         manifest = {
-            "version": 1,
+            "version": 2,
             "max_long_edge": MAX_LONG_EDGE,
             "source_shortcut": str(shortcut) if shortcut else None,
             "source_root": str(source_root),
-            "target_root": str(target_root),
+            "target_root": ".",
             "files": files,
         }
         write_json_atomic(manifest_path, manifest)
@@ -295,7 +313,8 @@ def main(argv=None):
         parser.error(str(exc))
     created = sum(item["status"] == "created" for item in manifest["files"])
     reused = len(manifest["files"]) - created
-    print(f"prepared={created} reused={reused} manifest={Path(manifest['target_root']) / MANIFEST_NAME}")
+    manifest_path = args.task_root.resolve() / OUTPUT_DIR_NAME / MANIFEST_NAME
+    print(f"prepared={created} reused={reused} manifest={manifest_path}")
     return 0
 
 

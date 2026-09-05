@@ -1,16 +1,22 @@
+import importlib.util
 import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from PIL import Image
 
 
 SCRIPT = Path(__file__).with_name("prepare_product_photos.py")
 OUTPUT_DIR = "2560px拍摄图"
+SPEC = importlib.util.spec_from_file_location("prepare_product_photos", SCRIPT)
+PREPARE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(PREPARE)
 
 
 class PrepareProductPhotosTests(unittest.TestCase):
@@ -26,7 +32,7 @@ class PrepareProductPhotosTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def run_script(self, source=True):
-        command = [sys.executable, str(SCRIPT), "--task-root", str(self.task.resolve())]
+        command = [sys.executable, "-X", "utf8", str(SCRIPT), "--task-root", str(self.task.resolve())]
         if source:
             command.extend(["--source", str(self.source.resolve())])
         return subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -59,6 +65,109 @@ class PrepareProductPhotosTests(unittest.TestCase):
         self.assertEqual((item["target_width"], item["target_height"]), (100, 50))
         self.assertEqual(item["source_sha256"], item["target_sha256"])
         self.assertEqual(item["operation"], "copied")
+
+    def test_writes_portable_manifest_and_absolute_cli_location(self):
+        source = self.source / "正面 空格" / "01.JPG"
+        self.jpeg(source)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = self.manifest()
+        self.assertEqual(manifest["version"], 2)
+        self.assertEqual(manifest["target_root"], ".")
+        item = manifest["files"][0]
+        self.assertEqual(item["target_path"], "正面 空格/01.JPG")
+        self.assertEqual(item["relative_path"], item["target_path"])
+        self.assertEqual(item["source_path"], str(source.resolve()))
+        self.assertEqual(manifest["source_root"], str(self.source.resolve()))
+        self.assertIn("manifest=" + str(self.task / OUTPUT_DIR / "_manifest.json"), result.stdout)
+
+    def test_copied_manifest_and_cache_resolve_without_original_task_or_source(self):
+        for folder, color in [("正面 空格", "red"), ("背面/细节", "blue")]:
+            self.jpeg(self.source / folder / "same.jpg", color=color)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = self.manifest()
+        cache = {"version": 2, "files": [
+            {"target_path": item["target_path"], "sha256": item["target_sha256"],
+             "facts": "fixture product", "completeness": "完整", "viewpoint": "正面",
+             "occlusion": "未见", "structure_3d": "清晰", "people": "未见"}
+            for item in manifest["files"]
+        ]}
+        original_output = self.task / OUTPUT_DIR
+        PREPARE.write_json_atomic(original_output / "_inspection_cache.json", cache)
+        copied_output = self.root / "需求 B 空格" / OUTPUT_DIR
+        shutil.copytree(original_output, copied_output)
+        # Both moves remain inside this test's isolated temporary directory.
+        for old, name in [(self.task, "old task unavailable"), (self.source, "old source unavailable")]:
+            new = self.root / name
+            self.assertTrue(old.resolve().is_relative_to(self.root.resolve()))
+            self.assertTrue(new.resolve().is_relative_to(self.root.resolve()))
+            old.rename(new)
+        copied_manifest = json.loads((copied_output / "_manifest.json").read_text(encoding="utf-8"))
+        copied_cache = json.loads((copied_output / "_inspection_cache.json").read_text(encoding="utf-8"))
+        self.assertEqual(copied_manifest, manifest)  # Includes every original source_* value.
+        self.assertEqual(copied_cache, cache)
+        for item, record in zip(copied_manifest["files"], copied_cache["files"]):
+            target = PREPARE.target_path(copied_output, item["target_path"])
+            self.assertTrue(target.is_relative_to(copied_output.resolve()))
+            self.assertEqual(record["target_path"], item["target_path"])
+            self.assertEqual(PREPARE.sha256_file(target), record["sha256"])
+            self.assertFalse(Path(item["source_path"]).exists())
+
+    def test_explicit_initialization_reuses_copied_targets(self):
+        self.jpeg(self.source / "front" / "same.jpg")
+        self.assertEqual(self.run_script().returncode, 0)
+        copied_task = self.root / "copied task"
+        copied_output = copied_task / OUTPUT_DIR
+        shutil.copytree(self.task / OUTPUT_DIR, copied_output)
+        target = copied_output / "front" / "same.jpg"
+        before = target.stat().st_mtime_ns
+        with patch.object(PREPARE, "atomic_copy", side_effect=AssertionError("must reuse")), \
+             patch.object(PREPARE, "resize_atomic", side_effect=AssertionError("must reuse")), \
+             patch.object(PREPARE, "image_info", side_effect=AssertionError("must not decode")):
+            manifest = PREPARE.prepare(copied_task, self.source)
+        self.assertEqual(manifest["files"][0]["status"], "reused")
+        self.assertEqual(target.stat().st_mtime_ns, before)
+
+    def test_target_paths_reject_absolute_noncanonical_and_escaping_paths(self):
+        root = self.task / OUTPUT_DIR
+        root.mkdir()
+        invalid = ["../outside.jpg", "nested/../../outside.jpg", "/outside.jpg",
+                   "C:/outside.jpg", "C:outside.jpg", "//server/share/photo.jpg",
+                   "nested\\photo.jpg", "", ".", "./photo.jpg", "nested//photo.jpg"]
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(PREPARE.PreparationError):
+                PREPARE.target_path(root, value)
+
+    def test_manifest_rejects_escaping_or_inconsistent_target_records(self):
+        self.jpeg(self.source / "valid.jpg")
+        self.assertEqual(self.run_script().returncode, 0)
+        root = self.task / OUTPUT_DIR
+        manifest = self.manifest()
+        for target in ["../outside.jpg", "other.jpg"]:
+            with self.subTest(target=target):
+                manifest["files"][0]["target_path"] = target
+                PREPARE.write_json_atomic(root / "_manifest.json", manifest)
+                with self.assertRaises(PREPARE.PreparationError):
+                    PREPARE.read_manifest(root / "_manifest.json", self.source, root)
+
+    def test_target_paths_reject_symlink_escape(self):
+        root = self.task / OUTPUT_DIR
+        root.mkdir()
+        if sys.platform == "win32":
+            environment = os.environ.copy()
+            environment["TEST_JUNCTION_PATH"] = str(root / "escape")
+            environment["TEST_JUNCTION_TARGET"] = str(self.source)
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "New-Item -ItemType Junction -Path $env:TEST_JUNCTION_PATH -Value $env:TEST_JUNCTION_TARGET -ErrorAction Stop | Out-Null"],
+                env=environment, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        else:
+            (root / "escape").symlink_to(self.source, target_is_directory=True)
+        with self.assertRaises(PREPARE.PreparationError):
+            PREPARE.target_path(root, "escape/photo.jpg")
 
     def test_resizes_exif_jpeg_mpo_and_png_to_correct_orientation(self):
         exif_jpeg = self.source / "rotated.JPG"
