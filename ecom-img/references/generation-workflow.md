@@ -21,7 +21,9 @@
 - 使用一个全新的 `product_image_inspector`，只查看 `2560px拍摄图/_manifest.json` 登记的全部目标文件，逐张返回绝对路径和产品可见事实；主 Agent 据此锁定产品身份、颜色、纹理、结构、比例和禁止偏离项。
 - 产品基准锁定后，主 Agent 亲自查看需求表中的全部图片和需求表以外的颜色/面料、结构细节、插入或辅助图片等，记录路径、来源位置、可见事实、分类、理由和适用图号，并冻结分类。
 
-**生成 Subagent**
+**生成 Subagent (`product_image_creator`)**
+
+- 本技能及工具适配器中的“生成 Subagent”“单版生成 Subagent”和“替补生成 Subagent”均指 `product_image_creator`。首次生成与技术替补均显式使用 `agent_type="product_image_creator"`、`fork_turns="none"` 创建全新实例，并通过派发消息完整提供当前 direct 的冻结任务包；模型与推理强度由该角色的独立配置固定，不在派发参数中覆盖。
 
 - 每个 direct 使用一个全新 Subagent；只接收当前冻结提示词、产品基准、该 direct 自己的唯一 `edit target`（目标画面不出现产品时不设置）、其他已选实拍、实拍与对应色块的映射、其他实际生成输入的准确路径、唯一目标文件名和当前工具适配器的硬性调用合同，只调用一次当前生图工具。
 - 选择 ImageGen 时，硬性调用合同必须逐项列出按 `Image N` 顺序冻结的 `referenced_image_paths`，并明确禁止 `num_last_images_to_include`；路径、顺序或参数合同缺失时不得调用。生成 Subagent 不自行补写、删减或改写冻结提示词中的条件约束。

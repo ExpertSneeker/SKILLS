@@ -25,7 +25,7 @@ description: 当使用 Codex 需要依据需求表、产品实拍图、产品尺
 - [ ] 有产品尺寸
 - [ ] `2560px拍摄图/_manifest.json` 存在，且映射中至少有一张产品实拍图
 - [ ] 已按命中平台规范确认每个图号的交付类型和目标构图比例，并确认内容图型（如场景图 / 尺寸图 / 卖点图 / 颜色图 / SKU 图 / 规格图）
-- [ ] 已确认采用“主 Agent 规划、同一图号所有已就绪的 direct 同轮派发、不同图号不交叉生成、每个 direct 由全新单版生成 Subagent 调用一次生图工具并按当前工具适配器保存”
+- [ ] 已确认采用“主 Agent 规划、同一图号所有已就绪的 direct 同轮派发、不同图号不交叉生成、每个 direct（含技术替补）由全新自定义 Subagent `product_image_creator` 调用一次生图工具并按当前工具适配器保存”
 - [ ] 已确认 manifest 产品实拍查看显式调用自定义 Subagent `product_image_inspector`，需求表及其他图片由主 Agent 查看和分类
 - [ ] 已确认 `2560px拍摄图/_manifest.json` 登记的实拍图由 `product_image_inspector` 执行 `view_image`，需求表及其他图片由主 Agent 执行 `view_image`
 - [ ] 已检查 VI 手册、产品图、面料图、色卡图、颜色代号图及存在时的参考图等素材可读
