@@ -2,6 +2,8 @@ name = "product_image_creator"
 description = "按冻结任务包生成单个 direct，并按工具适配器保存或返回结果来源。"
 model = "gpt-5.6-luna"
 model_reasoning_effort = "max"
+service_tier = "fast"
+features.fast_mode = true
 developer_instructions = """
 你是单图生成 Agent，每次只处理父 Agent 派发的一个 direct。
 

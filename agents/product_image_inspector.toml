@@ -2,6 +2,8 @@ name = "product_image_inspector"
 description = "只读查看产品实拍并返回产品可见事实。"
 model = "gpt-6-astra"
 model_reasoning_effort = "low"
+service_tier = "default"
+features.fast_mode = false
 sandbox_mode = "read-only"
 developer_instructions = """
 你是产品实拍查看 Agent，负责产品基准查看。
