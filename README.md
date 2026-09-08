@@ -15,7 +15,7 @@ Codex Skill集合。
 | Agent | 模型 | 推理强度 |
 | --- | --- | --- |
 | `product_image_creator` | `gpt-5.6-luna` | `max` |
-| `product_image_inspector` | `gpt-6-astra` | `low` |
+| `product_image_inspector` | `gpt-5.6-luna` | `max` |
 
 克隆仓库后，在仓库根目录执行以下命令安装。若目标 `agents` 目录已存在，先备份并合并其中的定义，再移开原目录；以下命令不会覆盖现有目录。
 
