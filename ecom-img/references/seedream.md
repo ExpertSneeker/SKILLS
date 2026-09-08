@@ -32,6 +32,6 @@ python <ecom-img-skill-dir>\scripts\seedream5_pro.py --prompt-file <absolute-utf
 
 - 每个 direct 的 `attempt_count` 是累计 POST 次数，包含脚本内部自动重试，最多为 2；所有恢复和技术替补沿用同一输出路径及 `_records/<stem>.call.json`，不得删除记录或更换路径重置计数。只有脚本识别为官方建议重试的结构化 `429`/`500` 才在同一次脚本调用内自动重试一次。
 - 其他明确失败只有在记录为 `failed`、`retry_eligible=true`、`attempt_count=1` 且修正后的请求指纹发生变化时，才允许由全新技术替补执行剩余一次 POST；已达到 2 次时不得追加生成。文件确认失败也须先检查记录，不因缺图或损坏直接重做；图片内容不得触发重新生成。官方未标注不扣费错误，不预设白名单。
-- 未知超时、断连或截断的 `unresolved`，以及中断后遗留、结果未明的 `calling`，均保留待核实状态并按生成模块暂停当前图号，不重新 POST，不标记整套完成或创建收尾 `DESIGN.md`。
+- 未知超时、断连或截断的 `unresolved`，以及中断后遗留、结果未明的 `calling`，均保留待核实状态并按生成模块暂停当前图号，不重新 POST，不标记整套完成；保留提示词编写前已读取或创建的 `DESIGN.md`。
 - `download_pending` 只恢复剩余 GET 下载机会，累计最多 2 次 GET（含首次），不重新 POST；URL 仅 24 小时有效，完成后立即下载。下载机会耗尽或无法恢复时记录最终技术失败，不以新生成替代下载恢复。
 - 记录包含提交、生成完成及耗时、下载时序、HTTP/错误码、输出尺寸/字节/SHA256。`ARK_API_KEY` 先从进程环境读取，再读取 Windows Machine；密钥、Authorization 和 Base64 不得落盘。
