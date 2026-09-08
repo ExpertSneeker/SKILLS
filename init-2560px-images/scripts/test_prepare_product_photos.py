@@ -233,6 +233,123 @@ class PrepareProductPhotosTests(unittest.TestCase):
         self.assertIn("no supported images", result.stderr)
         self.assertFalse((self.task / OUTPUT_DIR / "_manifest.json").exists())
 
+    def shortcut(self, link, target):
+        link.parent.mkdir(parents=True, exist_ok=True)
+        environment = os.environ.copy()
+        environment.update(TEST_SHORTCUT=str(link), TEST_SHORTCUT_TARGET=str(target))
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:TEST_SHORTCUT);"
+             "$s.TargetPath=$env:TEST_SHORTCUT_TARGET;$s.Save()"],
+            env=environment, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_auto_discovers_photo_folder_without_requiring_raw_files(self):
+        for name in ["产品拍摄原图", "产品实拍图", "拍摄图"]:
+            with self.subTest(name=name):
+                folder = self.task / name
+                self.jpeg(folder / "front.jpg")
+                result = self.run_script(source=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.manifest()["source_root"], str(folder))
+                folder.rename(self.root / name)
+
+    def test_ambiguous_photo_folders_require_explicit_source(self):
+        self.jpeg(self.task / "产品实拍图" / "a.jpg")
+        self.jpeg(self.task / "拍摄图" / "b.jpg")
+        result = self.run_script(source=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("multiple", result.stderr)
+        self.assertIn("--source", result.stderr)
+        self.assertFalse((self.task / OUTPUT_DIR).exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows shortcut behavior")
+    def test_photo_folder_expands_three_shortcuts_with_distinct_output_paths(self):
+        folder = self.task / "产品拍摄原图"
+        for name, color in [("奥利芬ARY-014", "red"), ("奥利芬bry9", "blue"),
+                            ("主图产品NGLS701-013", "green")]:
+            source = self.source / name / "角度" / "same.JPG"
+            self.jpeg(source, color=color)
+            source.with_suffix(".ARW").write_bytes(b"raw must not be decoded")
+            self.shortcut(folder / (name + ".lnk"), self.source / name)
+        self.jpeg(self.task / "unrelated.jpg")
+        result = self.run_script(source=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = self.manifest()
+        self.assertEqual(len(manifest["files"]), 3)
+        self.assertEqual(manifest["source_root"], str(folder))
+        for item in manifest["files"]:
+            target = self.task / OUTPUT_DIR / item["target_path"]
+            self.assertEqual(target.read_bytes(), Path(item["source_path"]).read_bytes())
+            self.assertTrue(item["target_path"].endswith("/角度/same.JPG"))
+        self.assertEqual(len({item["target_sha256"] for item in manifest["files"]}), 3)
+        again = self.run_script(source=False)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn("prepared=0 reused=3", again.stdout)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows shortcut behavior")
+    def test_explicit_source_mixes_photos_subfolders_and_nested_shortcuts(self):
+        external = self.root / "external"
+        self.jpeg(external / "remote.jpg")
+        self.jpeg(self.source / "local.jpg")
+        self.shortcut(self.source / "分组" / "别名.lnk", external)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual({item["target_path"] for item in self.manifest()["files"]},
+                         {"local.jpg", "分组/别名/remote.jpg"})
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows shortcut behavior")
+    def test_broken_nested_shortcut_fails_before_writing_any_images(self):
+        self.jpeg(self.source / "valid.jpg")
+        self.shortcut(self.source / "missing.lnk", self.root / "missing")
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing.lnk", result.stderr)
+        self.assertFalse((self.task / OUTPUT_DIR).exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows shortcut behavior")
+    def test_shortcut_cycle_fails_before_writing_any_images(self):
+        self.jpeg(self.source / "valid.jpg")
+        self.shortcut(self.source / "loop.lnk", self.source)
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cycle", result.stderr)
+        self.assertFalse((self.task / OUTPUT_DIR).exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows shortcut behavior")
+    def test_shortcut_alias_collision_fails_before_overwriting(self):
+        self.jpeg(self.source / "same" / "photo.jpg")
+        external = self.root / "external"
+        self.jpeg(external / "photo.jpg", color="blue")
+        self.shortcut(self.source / "same.lnk", external)
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("collision", result.stderr)
+        self.assertFalse((self.task / OUTPUT_DIR).exists())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows shortcut behavior")
+    def test_retargeted_shortcut_does_not_reuse_old_source_with_same_stat(self):
+        first = self.root / "first"
+        second = self.root / "second"
+        self.jpeg(first / "photo.jpg", color="red")
+        self.jpeg(second / "photo.jpg", color="blue")
+        size = max((first / "photo.jpg").stat().st_size, (second / "photo.jpg").stat().st_size)
+        for photo in [first / "photo.jpg", second / "photo.jpg"]:
+            photo.write_bytes(photo.read_bytes().ljust(size, b"\0"))
+            os.utime(photo, ns=(1700000000000000000, 1700000000000000000))
+        link = self.source / "alias.lnk"
+        self.shortcut(link, first)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.shortcut(link, second)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        item = self.manifest()["files"][0]
+        self.assertEqual(item["source_path"], str(second / "photo.jpg"))
+        self.assertEqual((self.task / OUTPUT_DIR / "alias" / "photo.jpg").read_bytes(),
+                         (second / "photo.jpg").read_bytes())
+
     def test_reuses_unchanged_target_and_rebuilds_corruption_or_changed_source(self):
         source = self.source / "stable.jpg"
         self.jpeg(source, color="red")

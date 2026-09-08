@@ -19,6 +19,8 @@ OUTPUT_DIR_NAME = "2560px拍摄图"
 MANIFEST_NAME = "_manifest.json"
 LOCK_NAME = "_prepare.lock"
 SHORTCUT_NAME = "产品拍摄原图.lnk"
+SOURCE_DIR_NAME = "产品拍摄原图"
+SOURCE_DIR_ALIASES = {"产品实拍图", "实拍图", "拍摄图", "产品拍摄图"}
 FORMATS = {".jpg": {"JPEG", "MPO"}, ".jpeg": {"JPEG", "MPO"}, ".png": {"PNG"}}
 
 
@@ -67,7 +69,63 @@ def resolve_shortcut(path):
     target = result.stdout.strip()
     if result.returncode or not target:
         raise PreparationError("cannot resolve " + str(path))
-    return directory(target, "shortcut target")
+    return directory(target, "shortcut target for " + str(path))
+
+
+def discover_source(task_root, source):
+    if source is not None:
+        return directory(source, "source"), None
+    shortcut = task_root / SHORTCUT_NAME
+    if shortcut.is_file():
+        return resolve_shortcut(shortcut), shortcut
+    folder = task_root / SOURCE_DIR_NAME
+    if folder.is_dir():
+        return folder.resolve(), None
+    alternatives = sorted(
+        (path for path in task_root.iterdir()
+         if path.name in SOURCE_DIR_ALIASES and path.is_dir()),
+        key=lambda path: path.name,
+    )
+    if len(alternatives) == 1:
+        return alternatives[0].resolve(), None
+    if alternatives:
+        raise PreparationError("multiple photo directories found; pass --source: "
+                               + ", ".join(str(path) for path in alternatives))
+    raise PreparationError("no original photo directory or " + SHORTCUT_NAME
+                           + " found; pass --source")
+
+
+def collect_images(source_root, task_root, target_root):
+    """Expand directory shortcuts into stable, alias-prefixed output paths."""
+    candidates = []
+    destinations = {}
+    target_root = target_root.resolve()
+
+    def walk(folder, relative, ancestors):
+        folder = folder.resolve()
+        if (folder == task_root or folder.is_relative_to(target_root)
+                or target_root.is_relative_to(folder)):
+            raise PreparationError("source overlaps the task/output directory: " + str(folder))
+        if folder in ancestors:
+            raise PreparationError("source directory shortcut cycle: " + str(folder))
+        ancestors = ancestors | {folder}
+        for path in sorted(folder.iterdir(), key=lambda item: (item.name.casefold(), item.name)):
+            if path.is_dir():
+                walk(path, relative / path.name, ancestors)
+            elif path.suffix.lower() == ".lnk":
+                walk(resolve_shortcut(path), relative / path.stem, ancestors)
+            elif path.suffix.lower() in FORMATS and path.is_file():
+                output = (relative / path.name).as_posix()
+                target_path(target_root, output)
+                key = output.casefold()
+                if key in destinations:
+                    raise PreparationError("output path collision: " + output + " from "
+                                           + str(destinations[key]) + " and " + str(path))
+                destinations[key] = path
+                candidates.append((path.resolve(), output))
+
+    walk(source_root, PurePosixPath(), set())
+    return sorted(candidates, key=lambda item: (item[1].casefold(), item[1]))
 
 
 @contextmanager
@@ -233,21 +291,9 @@ def prepared_entry(source, target, relative, stat, source_sha, source_size, targ
 
 def prepare(task_root, source=None):
     task_root = directory(task_root, "task root")
-    shortcut = None
-    if source is None:
-        shortcut = (task_root / SHORTCUT_NAME).resolve()
-        source_root = resolve_shortcut(shortcut)
-    else:
-        source_root = directory(source, "source")
+    source_root, shortcut = discover_source(task_root, source)
     target_root = task_root / OUTPUT_DIR_NAME
-    if source_root == task_root or source_root == target_root:
-        raise PreparationError("source must be the original image directory, not the task root")
-
-    candidates = sorted(
-        (path for path in source_root.rglob("*")
-         if path.suffix.lower() in FORMATS and path.is_file()),
-        key=lambda path: path.relative_to(source_root).as_posix().casefold(),
-    )
+    candidates = collect_images(source_root, task_root, target_root)
     if not candidates:
         raise PreparationError("no supported images found")
 
@@ -256,11 +302,12 @@ def prepare(task_root, source=None):
     with task_lock(target_root / LOCK_NAME):
         previous = read_manifest(manifest_path, source_root, target_root)
         files = []
-        for source_path in candidates:
-            relative = source_path.relative_to(source_root).as_posix()
+        for source_path, relative in candidates:
             target = target_path(target_root, relative)
             stat = source_path.stat()
             old = previous.get(relative)
+            if old and old.get("source_path") != str(source_path):
+                old = None
             unchanged = old and old.get("source_bytes") == stat.st_size and old.get("source_mtime_ns") == stat.st_mtime_ns
             if unchanged and valid_target(old, target):
                 entry = dict(old)
@@ -309,7 +356,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         manifest = prepare(args.task_root, args.source)
-    except PreparationError as exc:
+    except (PreparationError, OSError) as exc:
         parser.error(str(exc))
     created = sum(item["status"] == "created" for item in manifest["files"])
     reused = len(manifest["files"]) - created
