@@ -4,7 +4,7 @@
 > ecom-img Skill的功能实现
 
 
-- [ ] 亚马逊主图中不允许出现文字，即使需求表中给出文案内容也忽略掉
+- [x] 亚马逊主图中不允许出现文字，即使需求表中给出文案内容也忽略掉
 - [x] 单图生成Subagent独立定义，Agent名字为 `product_image_creator` 固定模型为Luna Max
 - [x] 将product_image_inspector Agent的模型改为 Astra Low
 - [x] 除了定制品之外的产品需要传入产品尺寸，理解产品在现实中的大小，但是不要显式的出现在图中(尺寸图除外)，加在 ## 额外添加的提示词 里
