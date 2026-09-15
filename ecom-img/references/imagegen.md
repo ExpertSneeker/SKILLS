@@ -5,7 +5,7 @@
 ## 调用与来源
 
 - 按生成模块为每个 direct 派发一个全新单版生成 Subagent；该 Subagent 只允许调用一次内置 `image_gen`。
-- 所有输入必须有本地路径，并使用 `referenced_image_paths` 显式传入，不得依赖“最近图片”或其他 direct 的会话上下文；调用前确认路径不超过 5 条。
+- 所有输入必须有本地路径，并使用 `referenced_image_paths` 显式传入，不得依赖“最近图片”或其他 direct 的会话上下文；调用前确认路径不超过 5 条。这是现行项目限制；当前未核实它是内置工具的通用路径上限，不自行放宽。
 - 输入超过 5 条时，在派发生成 Subagent 前把同一角色的辅助素材整理为已查看的拼版；主产品身份输入不得与其他角色合并，也不得用一次失败调用探测上限。
 - `referenced_image_paths` 中的产品实拍只允许使用 `2560px拍摄图/_manifest.json` 登记的目标路径；禁止使用原始拍摄图。当前任务中已执行 `view_image` 并记录角色的颜色/面料、结构细节、插入或辅助素材可以作为其他实际生成输入。反推专用参考图禁止加入 `referenced_image_paths`。
 - 禁止使用 `num_last_images_to_include`；任何输入缺少本地路径时阻塞当前 direct，取得准确路径并重新执行 `view_image` 后再生成。
