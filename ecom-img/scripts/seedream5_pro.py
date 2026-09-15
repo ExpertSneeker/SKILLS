@@ -9,6 +9,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import time
@@ -130,6 +131,7 @@ def read_record(path):
 
 
 _locks, _locks_guard = {}, threading.Lock()
+# Process-local protection only; separate CLI processes do not share these slots.
 _generation_slots = threading.BoundedSemaphore(8)
 
 
@@ -220,14 +222,36 @@ def request_url(payload, key, http_open):
         raise UnresolvedResult(status, "invalid_response_shape")
     if not isinstance(item.get("url"), str) or not item["url"]:
         raise UnresolvedResult(status, "missing_response_url")
-    return item["url"], status
+    response_size = item.get("size")
+    if "size" in item:
+        try:
+            parse_response_size(response_size)
+        except (ValueError, TypeError) as exc:
+            raise UnresolvedResult(status, "invalid_response_size") from exc
+    return item["url"], status, response_size
 
 
-def matching_pending_output(output, pending, size):
+def parse_response_size(value):
+    """API data.size reports actual pixels; a resolution tier is not a square size."""
+    if not isinstance(value, str) or not re.fullmatch(r"[1-9][0-9]*x[1-9][0-9]*", value):
+        raise ValueError("invalid response dimensions")
+    return tuple(int(part) for part in value.split("x"))
+
+
+def expected_output_size(record, size):
+    if record.get("response_size") is not None:
+        try:
+            return parse_response_size(record["response_size"])
+        except (ValueError, TypeError) as exc:
+            raise RunError("invalid recorded response dimensions") from exc
+    # Older records / responses without size retain the former, limited contract.
+    return (1024, 1024) if size == "1K" else (2048, 2048)
+
+
+def matching_pending_output(output, pending, expected):
     if not isinstance(pending, dict) or not output.is_file():
         return None
     raw = output.read_bytes()
-    expected = (1024, 1024) if size == "1K" else (2048, 2048)
     if (pending.get("bytes") != len(raw) or pending.get("sha256") != sha256(raw)
             or (pending.get("width"), pending.get("height")) != expected):
         return None
@@ -241,22 +265,23 @@ def matching_pending_output(output, pending, size):
     return raw
 
 
-def complete_download(record, path, raw, audit, size):
+def complete_download(record, path, raw, audit, dimensions):
     completed_at = now()
     audit.update(download_completed_at=audit.get("download_completed_at") or completed_at, status="completed")
     record.update(state="completed", completed_at=completed_at,
                   download_completed_at=audit["download_completed_at"], download_elapsed_ms=audit.get("elapsed_ms"),
-                  output_width=1024 if size == "1K" else 2048, output_height=1024 if size == "1K" else 2048,
+                  output_width=dimensions[0], output_height=dimensions[1],
                   output_bytes=len(raw), output_sha256=sha256(raw), error_code=None)
     write_record(path, record)
 
 
 def download(record, path, output, http_open, size):
+    expected = expected_output_size(record, size)
     if output.exists():
-        raw = matching_pending_output(output, record.get("pending_output"), size)
+        raw = matching_pending_output(output, record.get("pending_output"), expected)
         if raw is None:
             raise RunError("existing output does not match pending download")
-        complete_download(record, path, raw, record["downloads"][-1], size)
+        complete_download(record, path, raw, record["downloads"][-1], expected)
         return output
     if record["download_attempt_count"] >= 2:
         raise RunError("download attempt limit reached")
@@ -278,7 +303,7 @@ def download(record, path, output, http_open, size):
             raise OSError("image download HTTP " + str(status))
         with Image.open(io.BytesIO(body)) as image:
             image.load()
-            if image.format != "PNG" or image.size != ((1024, 1024) if size == "1K" else (2048, 2048)):
+            if image.format != "PNG" or image.size != expected:
                 raise ValidationError("downloaded image is not the requested PNG size")
         output.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile("wb", dir=output.parent, suffix=".png", delete=False) as file:
@@ -304,7 +329,7 @@ def download(record, path, output, http_open, size):
     finally:
         if temp is not None:
             temp.unlink(missing_ok=True)
-    complete_download(record, path, body, audit, size)
+    complete_download(record, path, body, audit, expected)
     return output
 
 
@@ -379,7 +404,7 @@ def _run_unlocked(prompt_file, output, inputs=(), size="1K", http_open=urlopen, 
             record["submitted_at"] = audit["submitted_at"]
             write_record(path, record)
             try:
-                url, status = request_url(payload, key, http_open)
+                url, status, response_size = request_url(payload, key, http_open)
             except HTTPError as exc:
                 error = structured_error(exc.read())
                 record.update(generation_elapsed_ms=round((time.monotonic() - started) * 1000),
@@ -431,7 +456,7 @@ def _run_unlocked(prompt_file, output, inputs=(), size="1K", http_open=urlopen, 
                               generation_elapsed_ms=audit["elapsed_ms"], error_code=type(exc).__name__)
                 write_record(path, record)
                 raise RunError("generation result is unresolved") from exc
-            record.update(state="download_pending", temporary_url=url, post_http_status=status,
+            record.update(state="download_pending", temporary_url=url, response_size=response_size, post_http_status=status,
                           generation_completed_at=now(),
                           generation_elapsed_ms=round((time.monotonic() - started) * 1000),
                           error_code=None)

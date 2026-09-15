@@ -77,8 +77,11 @@ class HTTP:
         return Response(result)
 
 
-def generation(url="https://temporary.example/image"):
-    return json.dumps({"data": [{"url": url}]}).encode()
+def generation(url="https://temporary.example/image", size=None):
+    item = {"url": url}
+    if size is not None:
+        item["size"] = size
+    return json.dumps({"data": [item]}).encode()
 
 
 def explicit_error(code, message="bad", error_code="RateLimitExceeded.EndpointRPMExceeded"):
@@ -107,6 +110,90 @@ class Seedream5ProTests(unittest.TestCase):
         return self.m.run(
             self.prompt, self.output, http_open=http, environ={"ARK_API_KEY": "test-secret"}, **kwargs
         )
+
+    def test_documented_nonsquare_sizes_match_response_and_record(self):
+        for tier, dimensions in (("1K", (1152, 864)), ("2K", (2368, 1776))):
+            with self.subTest(tier=tier):
+                output = self.root / (tier + ".png")
+                reported = "%dx%d" % dimensions
+                http = HTTP([generation(size=reported)], [png(dimensions)])
+                self.m.run(self.prompt, output, size=tier, http_open=http,
+                           environ={"ARK_API_KEY": "test-secret"})
+                record = json.loads(self.m.record_path(output).read_text())
+                self.assertEqual(record["response_size"], reported)
+                self.assertEqual((record["output_width"], record["output_height"]), dimensions)
+                self.assertEqual(record["output_sha256"], self.m.sha256(output.read_bytes()))
+                self.assertEqual(record["attempt_count"], 1)
+
+    def test_response_size_mismatch_is_not_accepted_or_reposted(self):
+        with self.assertRaises(self.m.RunError):
+            self.call(HTTP([generation(size="1152x864")], [png()]))
+        self.assertFalse(self.output.exists())
+        recovery = HTTP([], [png((1152, 864))])
+        self.call(recovery)
+        self.assertEqual(recovery.post_requests, [])
+        self.assertEqual(len(recovery.get_urls), 1)
+
+    def test_nonsquare_without_size_metadata_keeps_conservative_fallback(self):
+        with self.assertRaises(self.m.RunError):
+            self.call(HTTP([generation()], [png((1152, 864))]))
+        self.assertFalse(self.output.exists())
+        record = json.loads(self.m.record_path(self.output).read_text())
+        self.assertEqual(record["state"], "download_pending")
+        self.assertEqual(record["attempt_count"], 1)
+
+    def test_invalid_response_size_is_unresolved_and_not_reposted(self):
+        for index, value in enumerate(("0x864", "-1x864", "1152X864", "1.5K", 123, "1152x864junk")):
+            with self.subTest(value=value):
+                output = self.root / ("bad-%d.png" % index)
+                http = HTTP([generation(size=value)], [png()])
+                with self.assertRaises(self.m.RunError):
+                    self.m.run(self.prompt, output, http_open=http, environ={"ARK_API_KEY": "key"})
+                record = json.loads(self.m.record_path(output).read_text())
+                self.assertEqual(record["state"], "unresolved")
+                self.assertEqual(record["error_code"], "invalid_response_size")
+                again = HTTP()
+                with self.assertRaises(self.m.RunError):
+                    self.m.run(self.prompt, output, http_open=again, environ={"ARK_API_KEY": "key"})
+                self.assertEqual(again.post_requests + again.get_urls, [])
+
+    def test_nonsquare_download_recovery_keeps_response_contract(self):
+        with self.assertRaises(self.m.RunError):
+            self.call(HTTP([generation(size="1152x864")], [URLError("offline")]))
+        again = HTTP([], [png((1152, 864))])
+        self.call(again)
+        record = json.loads(self.m.record_path(self.output).read_text())
+        self.assertEqual(again.post_requests, [])
+        self.assertEqual(record["download_attempt_count"], 2)
+        self.assertEqual(record["response_size"], "1152x864")
+        self.assertEqual((record["output_width"], record["output_height"]), (1152, 864))
+
+    def test_nonsquare_published_output_recovers_after_record_write_crash(self):
+        write = self.m.write_record
+        def crash(path, record):
+            if record.get("state") == "completed":
+                raise OSError("simulated final write failure")
+            write(path, record)
+        self.m.write_record = crash
+        try:
+            with self.assertRaises(OSError):
+                self.call(HTTP([generation(size="1152x864")], [png((1152, 864))]))
+        finally:
+            self.m.write_record = write
+        self.assertTrue(self.output.exists())
+        no_network = HTTP()
+        self.call(no_network)
+        self.assertEqual(no_network.post_requests + no_network.get_urls, [])
+        record = json.loads(self.m.record_path(self.output).read_text())
+        self.assertEqual(record["state"], "completed")
+        self.assertEqual((record["output_width"], record["output_height"]), (1152, 864))
+
+    def test_reported_size_does_not_accept_non_png_image(self):
+        stream = io.BytesIO()
+        Image.new("RGB", (1152, 864)).save(stream, "JPEG")
+        with self.assertRaises(self.m.RunError):
+            self.call(HTTP([generation(size="1152x864")], [stream.getvalue()]))
+        self.assertFalse(self.output.exists())
 
     def test_payload_without_inputs_defaults_to_1k_and_writes_png(self):
         http = HTTP([generation()], [png()])
