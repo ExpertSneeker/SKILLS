@@ -1,6 +1,6 @@
 name = "product_image_inspector"
 description = "只读查看产品实拍并返回产品可见事实。"
-model = "gpt-5.6-luna"
+model = "gpt-6-luna"
 model_reasoning_effort = "max"
 service_tier = "fast"
 features.fast_mode = true
