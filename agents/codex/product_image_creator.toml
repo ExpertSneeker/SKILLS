@@ -1,7 +1,7 @@
 name = "product_image_creator"
 description = "按冻结任务包生成单个 direct，并按工具适配器保存或返回结果来源。"
-model = "gpt-6-luna"
-model_reasoning_effort = "max"
+model = "gpt-6.1-terra"
+model_reasoning_effort = "medium"
 service_tier = "fast"
 features.fast_mode = true
 developer_instructions = """
