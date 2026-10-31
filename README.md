@@ -4,7 +4,7 @@ Codex Skill集合。
 
 ## Skill 路由
 
-- [ecom-img](ecom-img/SKILL.md)：用需求表与登记的产品实拍，规划／编写提示词、生成 Amazon 或 TEMU 成套商品图片，或恢复已有调用。仅规划不调用生图、不初始化、不创建或修改生产状态；事实不完整的提示词是草案。
+- [ecom-img](ecom-img/SKILL.md)：用需求表与登记的产品实拍，规划／编写提示词、生成 Amazon、TEMU 或乐天（Rakuten）成套商品图片，或恢复已有调用。仅规划不调用生图、不初始化、不创建或修改生产状态；事实不完整的提示词是草案。
 - [init-2560px-images](init-2560px-images/SKILL.md)：用户明确调用时，使用预处理脚本从 JPG/JPEG/PNG 原图建立 2560px 副本与清单。它保持显式调用；ecom-img 缺清单时不得自动补建或读取原图。
 - [codex-imagegen](codex-imagegen/SKILL.md)：任何非 Codex 的 Harness/Model 在需要生成或编辑位图且用户未指定其他工具时，默认调用本机 Codex CLI 的内置 `image_gen`。Codex 自身禁止使用本 Skill。
 

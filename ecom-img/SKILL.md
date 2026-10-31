@@ -1,6 +1,6 @@
 ---
 name: ecom-img
-description: 依据需求表和产品实拍，为 Amazon 或 TEMU 规划、生成成套商品图片，或恢复已有生成任务。
+description: 依据需求表和产品实拍，为 Amazon、TEMU 或乐天（Rakuten）规划、生成成套商品图片，或恢复已有生成任务。
 ---
 
 # 电商商品图片

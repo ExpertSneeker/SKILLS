@@ -4,6 +4,7 @@
 | --- | --- | --- |
 | amazon | Amazon、amazon、亚马逊 | [amazon.md](amazon.md) |
 | temu | TEMU、Temu、temu | [temu.md](temu.md) |
+| rakuten | 乐天、日本乐天、楽天、楽天市場、Rakuten、rakuten | [rakuten.md](rakuten.md) |
 
 - 平台只取用户明确指定值或需求表的平台字段；用户明确覆盖旧平台字段时采用该更新，其他字段按新平台强制要求校验后沿用。仍有未解决歧义、缺失或平台不支持时不猜测平台。
 - 竞品链接、目录名、语言、图片比例、A+、输出目录及历史任务不是平台字段。
