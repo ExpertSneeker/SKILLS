@@ -248,6 +248,6 @@ ecom-img/
 - [x] 违禁词、认证与功效限制；`./检测报告/` 作为含海绵或海绵颗粒产品阻燃、回弹、甲醛文案的依据，找不到依据的文案移除并在完成报告中列出
 - [x] 人物固定为东亚 30 岁左右女性；日系生活场景、iPhone 自然拍摄质感
 - [x] 前缀改为两档：含生活场景的图用 `Rakuten Ichiba E-commerce Image, shot on iPhone in a lived-in Japanese home, natural light`，白底图和纯信息图用 `Rakuten Ichiba E-commerce Image`；替代原 `Japanese Lifestyle Product Photography`（其中 Product / Lifestyle Photography 易导致棚拍、摆拍感）。未做真实生图验证。
-- [x] 含生活场景的图在【画面构成】加入“布景丰富”及前景、中景、背景分层布景；道具不遮挡、不抢主体、不与产品同类，需求表有限制时按需求表。未做真实生图验证。
+- [x] 含生活场景的图在【画面构成】加入“丰富的生活化布景”，具体物品交给生图模型；布景不遮挡、不抢主体、不与产品同类，需求表有限制时按需求表。未做真实生图验证。
 - [x] 通用钩子：事实依据目录的读取边界（inputs）、平台规定的人物与场景摄影写法（product-rules）、平台交付检查前移到生成前预检（generation-workflow）
 - [ ] 主图 20% 上限只能在提示词层约束；现行流程不查看成图，交付前无法确认成图是否合规
