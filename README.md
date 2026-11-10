@@ -7,12 +7,13 @@ Codex Skill集合。
 - [ecom-img](ecom-img/SKILL.md)：用需求表与登记的产品实拍，规划／编写提示词、生成 Amazon、TEMU 或乐天（Rakuten）成套商品图片，或恢复已有调用。仅规划不调用生图、不初始化、不创建或修改生产状态；事实不完整的提示词是草案。
 - [init-2560px-images](init-2560px-images/SKILL.md)：用户明确调用时，使用预处理脚本从 JPG/JPEG/PNG 原图建立 2560px 副本与清单。它保持显式调用；ecom-img 缺清单时不得自动补建或读取原图。
 - [codex-imagegen](codex-imagegen/SKILL.md)：任何非 Codex 的 Harness/Model 在需要生成或编辑位图且用户未指定其他工具时，默认调用本机 Codex CLI 的内置 `image_gen`。Codex 自身禁止使用本 Skill。
+- [human-realism-repair](human-realism-repair/SKILL.md)：仅用 Codex 内置 `image_gen` 修复 AI 人物的可见肢体、模板脸与质感，支持局部入镜、遮挡和多人；默认允许重建五官，保留人物属性、头部尺度、姿势服装及场景，保留合理细微瑕疵并验图；结果保存到原图同目录下的 `人物修复`。
 
-生成模式需具备需求表、真实尺寸、有效清单及适用的颜色、平台、视觉与工具合同。三版分别直出交付，不验图、不选 FINAL；来源与文件完整性仍须确认。TODO 仅作历史决策与未决事项记录，不作为运行指令。
+ecom-img 的生成模式需具备需求表、真实尺寸、有效清单及适用的颜色、平台、视觉与工具合同。三版分别直出交付，不验图、不选 FINAL；来源与文件完整性仍须确认。TODO 仅作历史决策与未决事项记录，不作为运行指令。
 
 ## Skill 安装位置
 
-三个 Skill 分别链接到 `~/.agents/skills/ecom-img`、`~/.agents/skills/init-2560px-images` 和 `~/.agents/skills/codex-imagegen`，目标是本仓库对应目录；不再在 `~/.codex/skills` 中建立这些入口。`codex-imagegen` 还需要暴露给 Claude Code 与 Gemini/Antigravity，按 [codex-imagegen/references/installation.md](codex-imagegen/references/installation.md) 建立额外链接。
+四个 Skill 分别链接到 `~/.agents/skills/ecom-img`、`~/.agents/skills/init-2560px-images`、`~/.agents/skills/codex-imagegen` 和 `~/.agents/skills/human-realism-repair`，目标是本仓库对应目录；不再在 `~/.codex/skills` 中建立这些入口。`codex-imagegen` 还需要暴露给 Claude Code 与 Gemini/Antigravity，按 [codex-imagegen/references/installation.md](codex-imagegen/references/installation.md) 建立额外链接。
 
 Windows PowerShell 在仓库根目录执行，使用目录联接（Junction）。若目标已存在，先核对内容与链接指向，不覆盖真实目录：
 
@@ -21,6 +22,7 @@ $skillRoot = Join-Path $env:USERPROFILE '.agents\skills'
 New-Item -ItemType Directory -Path $skillRoot -Force | Out-Null
 New-Item -ItemType Junction -Path (Join-Path $skillRoot 'ecom-img') -Target (Resolve-Path .\ecom-img).Path
 New-Item -ItemType Junction -Path (Join-Path $skillRoot 'init-2560px-images') -Target (Resolve-Path .\init-2560px-images).Path
+New-Item -ItemType Junction -Path (Join-Path $skillRoot 'human-realism-repair') -Target (Resolve-Path .\human-realism-repair).Path
 ```
 
 macOS / Linux 对应建立 `~/.agents/skills/<Skill 名称>` 到仓库同名目录的软链接。迁移旧安装时，将 `.codex/skills` 中这些旧链接移出加载目录；不要删除其指向的 Skill 源文件。
