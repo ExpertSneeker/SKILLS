@@ -7,7 +7,7 @@ Codex Skill集合。
 - [ecom-img](ecom-img/SKILL.md)：用需求表与登记的产品实拍，规划／编写提示词、生成 Amazon、TEMU 或乐天（Rakuten）成套商品图片，或恢复已有调用。仅规划不调用生图、不初始化、不创建或修改生产状态；事实不完整的提示词是草案。
 - [init-2560px-images](init-2560px-images/SKILL.md)：用户明确调用时，使用预处理脚本从 JPG/JPEG/PNG 原图建立 2560px 副本与清单。它保持显式调用；ecom-img 缺清单时不得自动补建或读取原图。
 - [codex-imagegen](codex-imagegen/SKILL.md)：任何非 Codex 的 Harness/Model 在需要生成或编辑位图且用户未指定其他工具时，默认调用本机 Codex CLI 的内置 `image_gen`。Codex 自身禁止使用本 Skill。
-- [human-realism-repair](human-realism-repair/SKILL.md)：仅用 Codex 内置 `image_gen` 修复 AI 人物的可见肢体、模板脸与质感，支持局部入镜、遮挡和多人；默认允许重建五官，保留人物属性、头部尺度、姿势服装及场景，保留合理细微瑕疵并验图；结果保存到原图同目录下的 `人物修复`。
+- [human-realism-repair](human-realism-repair/SKILL.md)：仅用 Codex 内置 `image_gen` 处理 AI 人物图：按具体的长相描述重新生成头部（脸与发型），修复清楚可见的肢体结构错误，其余画面保持不变。每张图冻结三版不同的提示词，由三个全新 `human_image_repairer` 各生成一版；主 Agent 保存到原图同目录下的 `人物修复` 并逐版验图。
 
 ecom-img 的生成模式需具备需求表、真实尺寸、有效清单及适用的颜色、平台、视觉与工具合同。三版分别直出交付，不验图、不选 FINAL；来源与文件完整性仍须确认。TODO 仅作历史决策与未决事项记录，不作为运行指令。
 
@@ -29,12 +29,13 @@ macOS / Linux 对应建立 `~/.agents/skills/<Skill 名称>` 到仓库同名目�
 
 ## 自定义 SubAgent
 
-定义统一维护在 [agents/codex/](agents/codex/)，通过 `~/.codex/agents` 加载，可供不同商品任务使用：
+定义统一维护在 [agents/codex/](agents/codex/)，通过 `~/.codex/agents` 加载，可供不同商品任务和人物修复使用：
 
 | Agent | 模型 | 推理强度 |
 | --- | --- | --- |
 | `product_image_creator` | `gpt-5.6-luna` | `max` |
 | `product_image_inspector` | `gpt-5.6-luna` | `max` |
+| `human_image_repairer` | `gpt-6.1-terra` | `medium` |
 
 克隆仓库后，在仓库根目录执行以下命令安装。若目标 `agents` 目录已存在，先备份并合并其中的定义，再移开原目录；以下命令不会覆盖现有目录。
 

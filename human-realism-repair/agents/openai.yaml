@@ -1,4 +1,4 @@
 interface:
   display_name: "人物结构与真实感修复"
-  short_description: "仅用 Codex 内置生图修复模板脸与可见肢体，支持多人和局部入镜"
-  default_prompt: "使用 $human-realism-repair 按可见范围修复这张 AI 人物图片。重点改善五官组合和神态的模板感，皮肤保留合理细微瑕疵；保持原头部大小、人物属性、姿势服装和场景，不补画隐藏部位，多人分别检查。"
+  short_description: "重新生成人物头部并修复可见肢体，每张图由三个 Subagent 各出一版"
+  default_prompt: "使用 $human-realism-repair 处理这张 AI 人物图片：重新生成头部（脸与发型），修复清楚可见的肢体结构错误，其余画面保持不变，出三版。"
