@@ -210,19 +210,101 @@ class PrepareProductPhotosTests(unittest.TestCase):
             ["back/same.jpg", "front/same.jpg"],
         )
 
-    def test_invalid_supported_image_fails_without_replacing_manifest(self):
+    def test_invalid_images_are_reported_while_other_images_are_prepared_or_reused(self):
         self.jpeg(self.source / "valid.jpg")
         first = self.run_script()
         self.assertEqual(first.returncode, 0, first.stderr)
-        manifest = self.task / OUTPUT_DIR / "_manifest.json"
-        previous = manifest.read_bytes()
-        (self.source / "broken.jpg").write_bytes(b"not a jpeg")
+        broken = self.source / "损坏 空格.jpg"
+        broken.write_bytes(b"not a jpeg")
+        mismatch = self.source / "mismatch.jpg"
+        Image.new("RGB", (10, 10)).save(mismatch, "PNG")
+        self.jpeg(self.source / "最后.jpg")
+
+        result = self.run_script()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("prepared=1 reused=1 failed=2", result.stdout)
+        manifest = self.manifest()
+        self.assertEqual([item["relative_path"] for item in manifest["files"]],
+                         ["valid.jpg", "最后.jpg"])
+        self.assertEqual([item["relative_path"] for item in manifest["failed"]],
+                         ["mismatch.jpg", "损坏 空格.jpg"])
+        for item, source in zip(manifest["failed"], [mismatch, broken]):
+            self.assertEqual(item["source_path"], str(source))
+            self.assertTrue(item["error"])
+            self.assertIn(str(source), result.stdout)
+            self.assertIn(item["error"], result.stdout)
+            self.assertFalse((self.task / OUTPUT_DIR / source.name).exists())
+        self.assertEqual((self.task / OUTPUT_DIR / "最后.jpg").read_bytes(),
+                         (self.source / "最后.jpg").read_bytes())
+
+    def test_all_failed_images_are_reported_without_claiming_success(self):
+        for name in ["broken.jpg", "broken.png"]:
+            (self.source / name).write_bytes(b"not an image")
 
         result = self.run_script()
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("broken.jpg", result.stderr)
-        self.assertEqual(manifest.read_bytes(), previous)
+        self.assertIn("prepared=0 reused=0 failed=2", result.stdout)
+        self.assertIn("manifest=" + str(self.task / OUTPUT_DIR / "_manifest.json"), result.stdout)
+        self.assertEqual(self.manifest()["files"], [])
+        self.assertEqual([item["relative_path"] for item in self.manifest()["failed"]],
+                         ["broken.jpg", "broken.png"])
+        for name in ["broken.jpg", "broken.png"]:
+            self.assertIn(str(self.source / name), result.stdout)
+
+    def test_repaired_images_are_retried_and_removed_from_failure_summary(self):
+        broken = self.source / "broken.jpg"
+        broken.write_bytes(b"not a jpeg")
+        self.jpeg(self.source / "valid.jpg")
+        first = self.run_script()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn("failed=1", first.stdout)
+
+        self.jpeg(broken)
+        result = self.run_script()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("prepared=1 reused=1 failed=0", result.stdout)
+        self.assertEqual(self.manifest()["failed"], [])
+        self.assertEqual([item["relative_path"] for item in self.manifest()["files"]],
+                         ["broken.jpg", "valid.jpg"])
+
+    def test_newly_corrupted_source_is_removed_from_successful_manifest_entries(self):
+        broken = self.source / "broken.jpg"
+        self.jpeg(broken)
+        self.jpeg(self.source / "valid.jpg")
+        self.assertEqual(self.run_script().returncode, 0)
+        broken.write_bytes(b"now corrupt")
+
+        result = self.run_script()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("prepared=0 reused=1 failed=1", result.stdout)
+        self.assertEqual([item["relative_path"] for item in self.manifest()["files"]],
+                         ["valid.jpg"])
+        self.assertEqual(self.manifest()["failed"][0]["relative_path"], "broken.jpg")
+
+    def test_copy_and_resize_write_failures_do_not_stop_remaining_images(self):
+        output = self.task / OUTPUT_DIR
+        (output / "blocked.jpg").mkdir(parents=True)
+        self.jpeg(self.source / "valid.jpg")
+        for size in [(100, 50), (4000, 2000)]:
+            with self.subTest(size=size):
+                self.jpeg(self.source / "blocked.jpg", size=size)
+
+                result = self.run_script()
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("failed=1", result.stdout)
+                self.assertEqual([item["relative_path"] for item in self.manifest()["files"]],
+                                 ["valid.jpg"])
+                self.assertEqual(self.manifest()["failed"][0]["relative_path"], "blocked.jpg")
+                self.assertIn(str(self.source / "blocked.jpg"), result.stdout)
+                self.assertEqual((output / "valid.jpg").read_bytes(),
+                                 (self.source / "valid.jpg").read_bytes())
+                self.assertEqual({path.name for path in output.iterdir()},
+                                 {"blocked.jpg", "valid.jpg", "_manifest.json", "_prepare.lock"})
 
     def test_no_supported_images_fails_without_manifest(self):
         (self.source / "only.ARW").write_bytes(b"raw")
