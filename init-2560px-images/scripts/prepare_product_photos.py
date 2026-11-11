@@ -302,40 +302,49 @@ def prepare(task_root, source=None):
     with task_lock(target_root / LOCK_NAME):
         previous = read_manifest(manifest_path, source_root, target_root)
         files = []
+        failed = []
         for source_path, relative in candidates:
             target = target_path(target_root, relative)
-            stat = source_path.stat()
-            old = previous.get(relative)
-            if old and old.get("source_path") != str(source_path):
-                old = None
-            unchanged = old and old.get("source_bytes") == stat.st_size and old.get("source_mtime_ns") == stat.st_mtime_ns
-            if unchanged and valid_target(old, target):
-                entry = dict(old)
-                entry["status"] = "reused"
-                files.append(entry)
-                continue
+            try:
+                stat = source_path.stat()
+                old = previous.get(relative)
+                if old and old.get("source_path") != str(source_path):
+                    old = None
+                unchanged = old and old.get("source_bytes") == stat.st_size and old.get("source_mtime_ns") == stat.st_mtime_ns
+                if unchanged and valid_target(old, target):
+                    entry = dict(old)
+                    entry["status"] = "reused"
+                    files.append(entry)
+                    continue
 
-            image_format, source_size = image_info(source_path)
-            source_sha = sha256_file(source_path)
-            if old and old.get("source_sha256") == source_sha and valid_target(old, target):
-                entry = dict(old)
-                entry.update(source_bytes=stat.st_size, source_mtime_ns=stat.st_mtime_ns, status="reused")
-                files.append(entry)
-                continue
+                image_format, source_size = image_info(source_path)
+                source_sha = sha256_file(source_path)
+                if old and old.get("source_sha256") == source_sha and valid_target(old, target):
+                    entry = dict(old)
+                    entry.update(source_bytes=stat.st_size, source_mtime_ns=stat.st_mtime_ns, status="reused")
+                    files.append(entry)
+                    continue
 
-            if max(source_size) <= MAX_LONG_EDGE:
-                atomic_copy(source_path, target)
-                target_size = source_size
-                operation = "copied"
-            else:
-                scale = MAX_LONG_EDGE / max(source_size)
-                target_size = tuple(max(1, round(value * scale)) for value in source_size)
-                resize_atomic(source_path, target, image_format, target_size)
-                operation = "resized"
-            files.append(prepared_entry(
-                source_path, target, relative, stat, source_sha, source_size, target_size,
-                operation, "created",
-            ))
+                if max(source_size) <= MAX_LONG_EDGE:
+                    atomic_copy(source_path, target)
+                    target_size = source_size
+                    operation = "copied"
+                else:
+                    scale = MAX_LONG_EDGE / max(source_size)
+                    target_size = tuple(max(1, round(value * scale)) for value in source_size)
+                    resize_atomic(source_path, target, image_format, target_size)
+                    operation = "resized"
+                files.append(prepared_entry(
+                    source_path, target, relative, stat, source_sha, source_size, target_size,
+                    operation, "created",
+                ))
+            except Exception as exc:
+                # Isolate image failures; task/path validation stays outside this handler.
+                failed.append({
+                    "relative_path": relative,
+                    "source_path": str(source_path),
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
 
         manifest = {
             "version": 2,
@@ -344,6 +353,7 @@ def prepare(task_root, source=None):
             "source_root": str(source_root),
             "target_root": ".",
             "files": files,
+            "failed": failed,
         }
         write_json_atomic(manifest_path, manifest)
         return manifest
@@ -361,9 +371,13 @@ def main(argv=None):
     created = sum(item["status"] == "created" for item in manifest["files"])
     reused = len(manifest["files"]) - created
     manifest_path = args.task_root.resolve() / OUTPUT_DIR_NAME / MANIFEST_NAME
-    print(f"prepared={created} reused={reused} manifest={manifest_path}")
-    return 0
+    print(f"prepared={created} reused={reused} failed={len(manifest['failed'])} manifest={manifest_path}")
+    if manifest["failed"]:
+        print("Failed images:")
+        for item in manifest["failed"]:
+            print(f"- {item['relative_path']} ({item['source_path']}): {item['error']}")
+    return 0 if manifest["files"] else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
