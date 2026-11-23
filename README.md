@@ -33,8 +33,8 @@ macOS / Linux 对应建立 `~/.agents/skills/<Skill 名称>` 到仓库同名目�
 
 | Agent | 模型 | 推理强度 |
 | --- | --- | --- |
-| `product_image_creator` | `gpt-5.6-luna` | `max` |
-| `product_image_inspector` | `gpt-5.6-luna` | `max` |
+| `product_image_creator` | `gpt-6-luna` | `medium` |
+| `product_image_inspector` | `gpt-6.1-terra` | `medium` |
 | `human_image_repairer` | `gpt-6.1-terra` | `medium` |
 
 克隆仓库后，在仓库根目录执行以下命令安装。若目标 `agents` 目录已存在，先备份并合并其中的定义，再移开原目录；以下命令不会覆盖现有目录。
